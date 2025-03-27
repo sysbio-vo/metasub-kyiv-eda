@@ -1,0 +1,76 @@
+---
+params:
+  classif_lvl: "G"
+  abundtable: "out/taxonomy-analysis/combined_report.bracken"
+  metadata: "data/complete_metadata.csv"
+  taxtable: "data/taxtable.tsv"
+  rank: "Genus"
+---
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("phyloseq")
+
+update.packages("BiocManager")
+```
+
+```{r setup}
+install.packages("BiocManager")
+BiocManager::install("phyloseq")
+pacman::p_load("dplyr", "phyloseq", "ANCOMBC", "tidyverse")
+```
+
+```{r}
+# extract taxid identified to filter taxonomy table
+taxids <- read.delim(params$abundtable) %>% pull(taxonomy_id)
+
+abund_df <- read.delim(params$abundtable) %>%
+  column_to_rownames("taxonomy_id") %>% 
+  select(ends_with("filtered_num")) %>% 
+  rename_with(~ gsub(".out.bracken.filtered_num", "", .x))
+
+meta <- read.csv(params$metadata) %>% 
+  filter(uuid %in% colnames(abund_df)) %>% 
+  column_to_rownames("uuid")
+
+ktax <- read.delim(params$taxtable, header = F,
+                   col.names = c("taxid",  "Kingdom", "Phylum", "Class",
+                                 "Order", "Family", "Genus", "Species", 
+                                 "Subspecies")) %>% 
+  column_to_rownames("taxid")
+```
+
+```{r}
+unique(ktax$taxlvl)
+```
+
+```{r}
+abund <- otu_table(as.matrix(abund_df), taxa_are_rows=T)
+meta <- sample_data(meta)
+tax <- tax_table(as.matrix(ktax))
+#tre1 <- read_tree(my_tree_file)
+```
+
+```{r}
+pseq <- phyloseq(abund, meta, tax)
+```
+
+```{r}
+sample_names(abund) == sample_names(meta)
+```
+```{r}
+all(sample_names(pseq) %in% rownames(meta))  # Should return TRUE
+all(rownames(meta) %in% sample_names(pseq)) 
+table(meta$station) 
+```
+
+```{r}
+out <- ancombc2(pseq, fix_formula = "station", group = "station",
+                struc_zero = TRUE,
+                neg_lb = FALSE,
+                p_adj_method = "holm",
+                verbose = TRUE)
+```
+

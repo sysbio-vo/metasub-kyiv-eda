@@ -1,0 +1,130 @@
+
+- [x] bracken pca
+- [x] barplot family stacked
+- [x] Jaccard dist heatmap
+- [ ] unclassified distrib
+
+```{r}
+pacman::p_load("dplyr", "tidyr", "ggplot2", "factoextra", "stringr", "forcats",
+               "janitor", "ggfortify", "pheatmap", "vegan")
+
+bracken <- read.delim("out/taxonomy-analysis/combined_out.bracken") %>%
+  select(taxonomy_id, ends_with("filtered_num")) %>% 
+  rename_with(~ str_remove_all(.x, "haib17CEM5241_HMGMHCCXY_|\\.out\\.bracken\\.filtered_num$"))
+
+taxt <- read.delim("out/DA_analysis/taxtable.tsv", header = F,
+                   col.names = c("taxonomy_id",  "Kingdom", "Phylum", "Class", "Order",
+                                 "Family", "Genus", "Species", "Subspecies"))
+
+bracken <- left_join(bracken, taxt, by="taxonomy_id")
+```
+
+# Bracken PCA
+
+```{r}
+meta <- read.csv("data/complete_metadata.csv") %>% 
+  filter(city == "kyiv",
+         !(station %in% c("busstop_20", ""))) %>% 
+  select(uuid, surface_material, station, surface) %>% 
+  mutate(id = word(uuid, 3, sep = "_"),
+         idcopy = id) %>% 
+  filter(!(id %in% id[duplicated(id)])) %>% 
+  tibble::column_to_rownames(var = "idcopy")
+```
+
+[!!!] Is there a difference between these duplicates?
+
+```{r}
+pcadata <- bracken %>% 
+  select(taxonomy_id, starts_with("SL"))%>% t() %>%
+  as.data.frame() %>% row_to_names(1)
+
+pca <- prcomp(pcadata, scale. = T)
+pcadata
+```
+```{r}
+pcadata_annot <- pcadata %>%
+  tibble::rownames_to_column(var = "id") %>% 
+  left_join(meta, by = "id")
+```
+
+```{r}
+fviz_eig(pca)
+```
+
+```{r}
+autoplot(pca, data = pcadata_annot, colour = "surface_material")
+```
+
+# Bracken out stacked bar
+
+```{r}
+famsums <- bracken %>% group_by(Family) %>% 
+  summarize(across(
+    .cols = starts_with("SL"), 
+    .fns = sum, 
+    .names = "{.col}"
+    )) %>% 
+  mutate(totabund = rowSums(select_if(., is.numeric))) %>% 
+  filter(totabund > 0) %>% 
+  mutate(Family = if_else(totabund / sum(totabund) > 0.01, Family, "Other")) %>% 
+  group_by(Family) %>% 
+  summarize(across(
+    .cols = is.numeric, 
+    .fns = sum))
+
+head(famsums, 3)
+```
+
+```{r}
+famsums_long <- famsums %>% 
+  pivot_longer(!Family, names_to = "sample", values_to = "count") %>%
+  mutate(Family = fct_reorder(Family, count, .fun = sum, .desc = TRUE))
+
+ggplot(famsums_long, aes(fill = Family, y = count, x = sample)) + 
+    geom_bar(position = "fill", stat = "identity") +
+    labs(x = NULL, y = NULL) +  # Remove axis labels
+    theme_void() +  # Apply clean theme
+    theme(
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),  # Rotate x-axis labels
+        legend.title = element_blank()  # Remove legend title for a cleaner look
+    )
+```
+- [] separate graph by surface
+- [] palette 
+
+# Jaccard distance heatmap
+
+
+```{r}
+distm <- select_if(pcadata_annot, is.numeric) %>% vegdist(method = "jaccard")
+distm <- as.matrix(distm)
+dim(as.matrix(distm))
+
+annotdf <- select_if(pcadata_annot, is.character) %>%
+  tibble::column_to_rownames(var = "id")
+
+colnames(distm) <- rownames(annotdf)
+rownames(distm) <- rownames(annotdf)
+
+```
+
+```{r}
+pheatmap(as.matrix(distm),
+         annotation_col = select(annotdf, station),
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean")
+```
+
+# The disctribution of unclassified reads
+
+```{r}
+uncl_reads <- read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/kraken-top-n-plot_Species.txt") %>% 
+  select(Unclassified)
+
+ggplot(uncl_reads, aes(x=Unclassified)) + 
+  geom_histogram(bins = 15)
+```
+
