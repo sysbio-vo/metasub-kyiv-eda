@@ -1,3 +1,17 @@
+# Nextflow
+.nextflow.log*
+.nextflow/
+work/
+WFreports/
+
+data/
+out/
+scripts/
+
+localDB/
+
+*.log
+
 .Rproj.user
 .Rhistory
 .RData
