@@ -2,11 +2,12 @@
 - [x] bracken pca
 - [x] barplot family stacked
 - [x] Jaccard dist heatmap
-- [ ] unclassified distrib
+- [x] unclassified distrib
 
 ```{r}
 pacman::p_load("dplyr", "tidyr", "ggplot2", "factoextra", "stringr", "forcats",
-               "janitor", "ggfortify", "pheatmap", "vegan")
+               "janitor", "ggfortify", "pheatmap", "vegan", "patchwork",
+               "ComplexHeatmap")
 
 bracken <- read.delim("out/taxonomy-analysis/combined_out.bracken") %>%
   select(taxonomy_id, ends_with("filtered_num")) %>% 
@@ -27,9 +28,15 @@ meta <- read.csv("data/complete_metadata.csv") %>%
          !(station %in% c("busstop_20", ""))) %>% 
   select(uuid, surface_material, station, surface) %>% 
   mutate(id = word(uuid, 3, sep = "_"),
-         idcopy = id) %>% 
+         idcopy = id,
+         station = gsub("petrivka", "Pochaina", station),
+         station = stringr::str_to_title(gsub("_", " ", station))) %>% 
   filter(!(id %in% id[duplicated(id)])) %>% 
   tibble::column_to_rownames(var = "idcopy")
+  
+  
+meta %>% filter(id %in% id[duplicated(id)]) %>% 
+  select(uuid, id, surface, surface_material, station) %>% View()
 ```
 
 [!!!] Is there a difference between these duplicates?
@@ -54,6 +61,55 @@ fviz_eig(pca)
 
 ```{r}
 autoplot(pca, data = pcadata_annot, colour = "surface_material")
+autoplot(pca, data = pcadata_annot, colour = "surface")
+autoplot(pca, data = pcadata_annot, colour = "station")
+
+```
+
+# PCA on RPM normalized
+
+```{r}
+pcadata_norm <- pcadata %>%
+  mutate(across(everything(), ~.x/sum(.x) * 1000000))
+
+pca_norm <- prcomp(pcadata_norm)
+
+head(pcadata_norm)
+```
+
+```{r}
+fviz_eig(pca_norm)
+```
+
+```{r}
+autoplot(pca_norm, data = pcadata_annot, colour = "surface_material")
+autoplot(pca_norm, data = pcadata_annot, colour = "surface")
+autoplot(pca_norm, data = pcadata_annot, colour = "station")
+
+```
+
+The outlier on the PCA plot
+
+```{r}
+pca_norm$x %>% as.data.frame() %>% 
+  filter(PC1 > 25*10^6) %>%
+  merge(meta, by="row.names") %>% 
+  select(!starts_with("PC"))
+```
+
+```{r}
+hist(data.frame(pca_norm$x)$PC1)
+```
+
+
+```{r}
+pca_norm_filt <- 
+pca_norm$x %>% as.data.frame() %>% 
+  filter(PC1 < 25*10^6) %>% 
+  merge(meta, by="row.names")
+
+ggplot(data = pca_norm_filt, aes(x=PC1, y=PC2, colour = factor(station))) +
+  geom_point()
 ```
 
 # Bracken out stacked bar
@@ -65,7 +121,7 @@ famsums <- bracken %>% group_by(Family) %>%
     .fns = sum, 
     .names = "{.col}"
     )) %>% 
-  mutate(totabund = rowSums(select_if(., is.numeric))) %>% 
+  mutate(totabund = rowSums(select_if(., where(is.numeric)))) %>% 
   filter(totabund > 0) %>% 
   mutate(Family = if_else(totabund / sum(totabund) > 0.01, Family, "Other")) %>% 
   group_by(Family) %>% 
@@ -79,44 +135,22 @@ head(famsums, 3)
 ```{r}
 famsums_long <- famsums %>% 
   pivot_longer(!Family, names_to = "sample", values_to = "count") %>%
-  mutate(Family = fct_reorder(Family, count, .fun = sum, .desc = TRUE))
+  mutate(Family = fct_reorder(Family, count, .fun = sum, .desc = TRUE)) %>% 
+  left_join(meta %>% tibble::rownames_to_column(var = ".sample"), by = c("sample" = ".sample")) %>% 
+  mutate(sample = if_else(sample == "totabund", "", sample),
+         station = if_else(is.na(station), "Total Abundance", station))
 
 ggplot(famsums_long, aes(fill = Family, y = count, x = sample)) + 
     geom_bar(position = "fill", stat = "identity") +
-    labs(x = NULL, y = NULL) +  # Remove axis labels
-    theme_void() +  # Apply clean theme
+    labs(x = NULL, y = NULL) +
+    theme_void() +
     theme(
         axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),  # Rotate x-axis labels
         legend.title = element_blank()  # Remove legend title for a cleaner look
-    )
-```
-- [] separate graph by surface
-- [] palette 
-
-# Jaccard distance heatmap
-
-
-```{r}
-distm <- select_if(pcadata_annot, is.numeric) %>% vegdist(method = "jaccard")
-distm <- as.matrix(distm)
-dim(as.matrix(distm))
-
-annotdf <- select_if(pcadata_annot, is.character) %>%
-  tibble::column_to_rownames(var = "id")
-
-colnames(distm) <- rownames(annotdf)
-rownames(distm) <- rownames(annotdf)
-
+    ) + facet_wrap(vars(station), scales = "free")
 ```
 
-```{r}
-pheatmap(as.matrix(distm),
-         annotation_col = select(annotdf, station),
-         show_rownames = TRUE,
-         show_colnames = TRUE,
-         clustering_distance_rows = "euclidean",
-         clustering_distance_cols = "euclidean")
-```
+- [] ? sort by human reads
 
 # The disctribution of unclassified reads
 
@@ -127,4 +161,98 @@ uncl_reads <- read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/krak
 ggplot(uncl_reads, aes(x=Unclassified)) + 
   geom_histogram(bins = 15)
 ```
+
+```{r}
+bardata <- 
+read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/kraken-top-n-plot_Species.txt",
+           check.names = F) %>%
+  mutate(id = word(Sample, 3, sep = "_")) %>% 
+  select(!Sample) %>% 
+  mutate(Classified = rowSums(select(., -c(id, Unclassified)))) %>% 
+  select(id, Classified, Unclassified) %>% 
+  mutate(id = fct_reorder(id, Classified))  %>%
+  pivot_longer(!id) %>%
+  mutate(name = factor(name, levels = c("Unclassified", "Classified"))) 
+```
+
+```{r fig.height=8, fig.width=9}
+p1 <- ggplot(bardata, aes(fill=name, y=id, x=value)) + 
+    geom_bar(position="stack", stat="identity") +
+  labs(title = "Number of reads", y = NULL, x = NULL) +
+  theme_minimal()
+
+p2 <- percreads <- ggplot(bardata, aes(fill=name, y=id, x=value)) + 
+    geom_bar(position="fill", stat="identity") +
+  labs(title = "Fraction of reads", y = NULL, x =NULL) +
+  theme_minimal()
+
+p1 + p2 + 
+  plot_layout(guides = "collect", axes = "collect_y") &
+  theme(legend.position = "bottom")
+```
+
+
+# Jaccard distance heatmap on PCA
+
+```{r}
+distm <- select_if(pcadata_annot, is.numeric) %>% vegdist(method = "jaccard")
+distm <- as.matrix(distm)
+dim(as.matrix(distm))
+
+colnames(distm) <- rownames(annotdf)
+rownames(distm) <- rownames(annotdf)
+
+```
+
+```{r}
+annotdf <- read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/kraken-top-n-plot_Species.txt",
+           check.names = F) %>%
+  mutate(id = word(Sample, 3, sep = "_")) %>% 
+  select("id", "Homo sapiens", "Unclassified") %>% 
+  left_join(meta)
+```
+
+```{r}
+pheatmap(as.matrix(distm),
+         annotation_col = select(annotdf, surface_material),
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean")
+```
+
+# Jaccard distance heatmap on Bracken out
+
+```{r}
+bracken <- 
+read.delim("out/taxonomy-analysis/combined_out.bracken") %>%
+  tibble::column_to_rownames(var="taxonomy_id") %>% 
+  select(ends_with("filtered_num")) %>% 
+  rename_with(~ str_remove_all(.x, "haib17CEM5241_HMGMHCCXY_|\\.out\\.bracken\\.filtered_num$"))
+
+samples_order <- colnames(bracken)
+
+distm <- t(bracken) %>% vegdist(method = "jaccard", diag = T, upper = T) %>%
+  as.matrix()
+colnames(distm) <- samples_order
+rownames(distm) <- samples_order
+```
+
+```{r}
+annotdf <- read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/kraken-top-n-plot_Species.txt",
+           check.names = F) %>%
+  mutate(tot = rowSums(select(., -Sample))) %>% 
+  mutate(id = word(Sample, 3, sep = "_")) %>% 
+  select("id", "Homo sapiens", "Unclassified", "tot") %>% 
+  left_join(meta) %>% 
+  tibble::column_to_rownames(var="id")
+```
+
+```{r fig.height=8, fig.width=10}
+ha = HeatmapAnnotation("Unclassified reads" = annotdf[samples_order, "Unclassified"],
+                       "Human reads" = annotdf[samples_order, "Homo sapiens"],
+                       "Total reads" = annotdf[samples_order, "tot"])
+Heatmap(distm, name = "Jaccard dist", top_annotation = ha)
+```
+
 
