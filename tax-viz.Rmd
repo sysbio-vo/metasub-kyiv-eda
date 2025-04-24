@@ -26,7 +26,7 @@ bracken <- left_join(bracken, taxt, by="taxonomy_id")
 meta <- read.csv("data/complete_metadata.csv") %>% 
   filter(city == "kyiv",
          !(station %in% c("busstop_20", ""))) %>% 
-  select(uuid, surface_material, station, surface) %>% 
+  select_if(sapply(., function(x) !all(is.na(x)), USE.NAMES = F)) %>% 
   mutate(id = word(uuid, 3, sep = "_"),
          idcopy = id,
          station = gsub("petrivka", "Pochaina", station),
@@ -161,6 +161,12 @@ uncl_reads <- read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/krak
 ggplot(uncl_reads, aes(x=Unclassified)) + 
   geom_histogram(bins = 15)
 ```
+# Hist number of reads
+
+```{r}
+ggplot(meta, aes(x=num_reads)) + 
+  geom_histogram(bins = 15)
+```
 
 ```{r}
 bardata <- 
@@ -245,14 +251,186 @@ annotdf <- read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/kraken-
   mutate(id = word(Sample, 3, sep = "_")) %>% 
   select("id", "Homo sapiens", "Unclassified", "tot") %>% 
   left_join(meta) %>% 
-  tibble::column_to_rownames(var="id")
-```
+  tibble::column_to_rownames(var="id") %>% 
+  mutate("Human reads, %" = .$"Homo sapiens" / tot,
+         "Human reads, log" = log10(.$"Homo sapiens"),
+         "Unclassified reads, %" = .$"Unclassified" / tot)
 
-```{r fig.height=8, fig.width=10}
-ha = HeatmapAnnotation("Unclassified reads" = annotdf[samples_order, "Unclassified"],
+annotdf
+```
+```{r fig.height=12, fig.width=12}
+ha = HeatmapAnnotation("Total reads" = annotdf[samples_order, "tot"],
+                       "Unclassified reads" = annotdf[samples_order, "Unclassified"],
+                       "Unclassified reads, %" = annotdf[samples_order, "Unclassified reads, %"],
                        "Human reads" = annotdf[samples_order, "Homo sapiens"],
-                       "Total reads" = annotdf[samples_order, "tot"])
+                       "Human reads, %" = annotdf[samples_order, "Human reads, %"],
+                       "Human reads, log" = annotdf[samples_order, "Human reads, log"],
+                       "Flowcell" = annotdf[samples_order, "hudson_alpha_flowcell"])
 Heatmap(distm, name = "Jaccard dist", top_annotation = ha)
 ```
 
+```{r fig.height=12, fig.width=12}
+ha = HeatmapAnnotation("Total reads" = annotdf[samples_order, "tot"],
+                       "Unclassified reads" = annotdf[samples_order, "Unclassified"],
+                       "Unclassified reads, %" = annotdf[samples_order, "Unclassified reads, %"],
+                       "Human reads" = annotdf[samples_order, "Homo sapiens"],
+                       "Human reads, %" = annotdf[samples_order, "Human reads, %"],
+                       "Human reads, log" = annotdf[samples_order, "Human reads, log"],
+                       "Flowcell" = annotdf[samples_order, "hudson_alpha_flowcell"])
+hm <- Heatmap(distm, name = "Jaccard dist", top_annotation = ha, column_km = 3, row_km = 3)
+hm <- draw(hm)
+```
+```{r}
+# get the clusters for Ancom
+clustl = column_order(hm)
+clustdf <- lapply(names(clustl), function(i){
+  out <- data.frame(id = colnames(distm)[clustl[[i]]],
+                    clust = i, stringsAsFactors = FALSE)
+     return(out)
+   }) %>% 
+  do.call(rbind, .)
+
+write.table(clustdf, file = "out/DA_analysis/clust_complete_euclidean.tsv", sep = "\t", row.names = F) 
+```
+
+```{r}
+meta$hudson_alpha_flowcell %>% unique()
+```
+## Without human reads
+
+```{r fig.height=12, fig.width=12}
+bracken_nh <- subset(bracken, rownames(bracken) != 9606)
+samples_order_nh <- colnames(bracken_nh)
+
+distm_nh <- bracken_nh %>% t()%>%
+  vegdist(method = "jaccard", diag = T, upper = T) %>% as.matrix()
+colnames(distm_nh) <- samples_order_nh
+rownames(distm_nh) <- samples_order_nh
+
+ha_nh = HeatmapAnnotation("Total reads" = annotdf[samples_order_nh, "tot"],
+                       "Unclassified reads" = annotdf[samples_order_nh, "Unclassified"],
+                       "Unclassified reads, %" = annotdf[samples_order_nh, "Unclassified reads, %"],
+                       "Human reads" = annotdf[samples_order_nh, "Homo sapiens"],
+                       "Human reads, %" = annotdf[samples_order_nh, "Human reads, %"],
+                       "Human reads, log" = annotdf[samples_order_nh, "Human reads, log"],
+                       "station" = annotdf[samples_order_nh, "station"],
+                       "surface material"= annotdf[samples_order_nh, "surface_material"])
+
+Heatmap(distm_nh, name = "Jaccard dist", top_annotation = ha_nh)
+```
+
+```{r}
+meta <- read.csv("data/complete_metadata.csv") %>% filter(city == "kyiv")
+colnames(meta)
+```
+
+```{r}
+meta[, unlist(lapply(meta, function(x) !all(is.na(x))))]
+```
+
+```{r}
+table(meta$hudson_alpha_flowcell)
+
+meta %>% 
+  select_if(sapply(., function(x) !all(is.na(x)), USE.NAMES = F))
+```
+
+# Heatmap of counts per sample
+
+```{r}
+summary(rowSums(bracken))
+```
+
+```{r}
+brackmat <- bracken_nh %>% arrange(desc(rowSums(.))) %>% head(200) %>% as.matrix()
+
+# calculate proportions of reads attributed to taxon
+brackmat <- sweep(brackmat, 2, colSums(brackmat), FUN = "/")
+```
+
+```{r fig.height=12, fig.width=12}
+ha = HeatmapAnnotation("Станція" = annotdf[samples_order, "station"],
+                       "Кількість прочитань" = annotdf[samples_order, "num_reads"],
+                       "Поверхня" = annotdf[samples_order, "surface"],
+                       "Матеріал" = annotdf[samples_order, "surface_material"],
+                       "Homo Sapiens прочитань, %" = annotdf[samples_order, "Human reads, %"])
+hm <- Heatmap(brackmat, name = "Прочитань", top_annotation = ha,
+        show_row_names = F, show_row_dend = F)
+
+draw(hm, column_title = "Кількість прочитань", cluster)
+```
+
+# Heatmap of correlation between samples
+
+```{r}
+#install.packages('pcaPP')
+cormat <- pcaPP::cor.fk(bracken)
+```
+
+
+```{r fig.height=12, fig.width=12}
+ha = HeatmapAnnotation("Станція" = annotdf[samples_order, "station"],
+                       "Поверхня" = annotdf[samples_order, "surface"],
+                       "Матеріал" = annotdf[samples_order, "surface_material"],
+                       "Загальна кількість прочитань" = annotdf[samples_order, "num_reads"],
+                       "Homo Sapiens прочитань, %" = annotdf[samples_order, "Human reads, %"])
+hm <- Heatmap(cormat, name = "Коеф.\nкор.", top_annotation = ha,
+        show_row_names = F, show_row_dend = F)
+
+draw(hm, column_title = "Кореляція Кендала")
+```
+
+# Heatmap of Jaccard distance between sample prevalence profiles
+
+```{r}
+bi_brackmat <- ifelse(as.matrix(bracken) == 0, 0, 1)
+
+distm_bi <- bi_brackmat %>% t()%>%
+  vegdist(method = "jaccard", diag = T, upper = T) %>% as.matrix()
+colnames(distm_bi) <- samples_order
+rownames(distm_bi) <- samples_order
+```
+
+```{r fig.height=12, fig.width=12}
+hm <- Heatmap(distm_bi, name = "Відстань", top_annotation = ha,
+              show_row_names = F, show_row_dend = F)
+draw(hm, column_title = "Відстань Жаккара між бінарними профілями присутності зразків")
+```
+
+# Taxonomy stats
+
+```{r}
+library(dplyr)
+bracken %>% left_join(ktax, by = rownames())
+
+brackannot <- bracken %>% merge(ktax, by=0)
+
+sstats <- brackannot %>%
+  mutate(tot_counts = rowSums(select(., starts_with("SL")))) %>% 
+  rowwise() %>%
+  mutate(num_samples = sum(c_across(where(is.numeric)) > 0)) %>% 
+  select(Species, Genus, tot_counts, num_samples) %>% 
+  arrange(desc(tot_counts))
+
+hist(sstats$tot_counts)
+summary(sstats$tot_counts)
+
+sstats %>% filter(tot_counts > quantile(.$tot_counts, .995))
+```
+Набір видів, що є спільними для всіх 69(?) зразків, складається з 52 видів. Серед них 
+```{r}
+brackannot %>%
+  mutate(tot_counts = rowSums(select(., starts_with("SL")))) %>% 
+  rowwise() %>%
+  mutate(num_samples = sum(c_across(where(is.numeric)) > 0)) %>% 
+  select(Species, Genus, tot_counts, num_samples) %>% 
+  filter(num_samples == max(.$num_samples))
+```
+
+Most prevalent genus
+
+```{r}
+sstats %>% group_by(Genus) %>% summarise(tot_counts = sum(tot_counts)) %>% 
+  arrange(desc(tot_counts)) %>% filter(tot_counts > quantile(.$tot_counts, 0.99))
+```
 

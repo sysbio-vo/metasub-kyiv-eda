@@ -1,28 +1,34 @@
 ---
 params:
   classif_lvl: "G"
-  abundtable: "out/taxonomy-analysis/combined_report.bracken"
-  metadata: "data/complete_metadata.csv"
-  taxtable: "data/taxtable.tsv"
+  abundtable: "out/taxonomy-analysis/combined_out.bracken"
+  metadata: "data/clean_metadata.csv"
+  taxtable: "out/DA_analysis/taxtable.tsv"
   rank: "Genus"
 ---
 
 ```{r}
-if (!require("BiocManager", quietly = TRUE))
-    install.packages("BiocManager")
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
 
-BiocManager::install("phyloseq")
+#update.packages("BiocManager")
+#BiocManager::install("ANCOMBC", lib="~/R/x86_64-pc-linux-gnu-library/4.4")
 
-update.packages("BiocManager")
-```
-
-```{r setup}
-install.packages("BiocManager")
-BiocManager::install("phyloseq")
-pacman::p_load("dplyr", "phyloseq", "ANCOMBC", "tidyverse")
+#BiocManager::install("microbiome")
 ```
 
 ```{r}
+library(dplyr)
+library(phyloseq)
+library(tibble)
+library(ANCOMBC)
+library(ComplexHeatmap)
+library(circlize)
+library(dplyr)
+library(tibble)
+library(vegan)
+library(Cairo)
+
 # extract taxid identified to filter taxonomy table
 taxids <- read.delim(params$abundtable) %>% pull(taxonomy_id)
 
@@ -42,35 +48,496 @@ ktax <- read.delim(params$taxtable, header = F,
   column_to_rownames("taxid")
 ```
 
+# Identify the main clusters
+
+Clustering samples on presence-absence profiles with Jaccard dist.
+
+```{r}
+bi_brackmat <- ifelse(as.matrix(abund_df) == 0, 0, 1)
+samples_order <- colnames(bi_brackmat)
+
+distm_bi <- bi_brackmat %>% t()%>%
+  vegdist(method = "jaccard", diag = T, upper = T) %>% as.matrix()
+colnames(distm_bi) <- samples_order
+rownames(distm_bi) <- samples_order
+
+sum(is.na(distm_bi))
+class(distm_bi)
+dim(distm_bi)
+isSymmetric(distm_bi)
+```
+
+```{r fig.width=12, fig.height=8}
+hc <- hclust(as.dist(distm_bi), method = "average")
+as.dendrogram(hc)
+
+plot(hc, hang = -1)
+```
+
+```{r}
+clust <- cutree(hc, k = 3)
+meta$clust <- clust[as.character(meta$sl_name)]
+```
+
 ```{r}
 unique(ktax$taxlvl)
 ```
 
+# Creating phyloseq object
+
 ```{r}
+# set station as reference for station_specificcar
+#meta$station_specific <- factor(meta$station_specific)
+#meta$station_specific <- relevel(meta$station_specific, ref = "car")
+
 abund <- otu_table(as.matrix(abund_df), taxa_are_rows=T)
 meta <- sample_data(meta)
 tax <- tax_table(as.matrix(ktax))
 #tre1 <- read_tree(my_tree_file)
-```
 
-```{r}
 pseq <- phyloseq(abund, meta, tax)
 ```
 
 ```{r}
-sample_names(abund) == sample_names(meta)
-```
-```{r}
-all(sample_names(pseq) %in% rownames(meta))  # Should return TRUE
+all(sample_names(pseq) %in% rownames(meta))
 all(rownames(meta) %in% sample_names(pseq)) 
 table(meta$station) 
 ```
 
 ```{r}
+saveRDS(pseq, file = "out/DA_analysis/pseq.rds")
+```
+
+# Run ANCOMBC
+
+```{r}
+library(openxlsx)
+wb <- createWorkbook()
+```
+
+
+## DA stations
+
+```{r}
+pseq <- readRDS(file = "out/DA_analysis/pseq.rds")
+```
+
+```{r}
 out <- ancombc2(pseq, fix_formula = "station", group = "station",
+                #tax_level = "Species",
                 struc_zero = TRUE,
                 neg_lb = FALSE,
                 p_adj_method = "holm",
-                verbose = TRUE)
+                verbose = TRUE,
+                pseudo_sens = TRUE,
+                global = TRUE, pairwise = TRUE, dunnet = TRUE)
 ```
 
+```{r}
+#saveRDS(out, file = "out/DA_analysis/ANCOMBC2.stations-res.rds")
+
+out <- readRDS(file = "out/DA_analysis/ANCOMBC2.stations-res.rds")
+```
+
+```{r save global}
+addWorksheet(wb, "stations_global")
+
+out$res_global %>% filter(diff_abn) %>% 
+  merge(ktax, by.x = "taxon", by.y = 0, all.x = T) %>%
+  select("Family", "Species", "q_val", "diff_abn" , "passed_ss") %>% 
+  mutate_if(is.numeric, ~formatC(., digits = 1, format = "e")) %>% 
+  rename("Родина" = Family,
+         "Вид" = Species,
+         "P-значення" = q_val,
+         "Диф.розповсюджений" = diff_abn,
+         "Пройшов SS" = passed_ss) %>%
+  writeData(wb, sheet = "stations_global", x = .)
+
+saveWorkbook(wb, "out/DA_analysis/ANCOMBC_res.xlsx", overwrite = T)
+```
+
+```{r}
+res_pair <- 
+out$res_pair %>%
+  filter(if_any(starts_with("diff_"), ~ .x == TRUE)) %>%
+  merge(ktax, by.x = "taxon", by.y = 0, all.x = T)
+```
+
+```{r save red_pair}
+addWorksheet(wb, "stations_pair")
+writeData(wb, sheet = "stations_pair", x = res_pair)
+saveWorkbook(wb, "out/DA_analysis/ANCOMBC_res.xlsx", overwrite = T)
+```
+
+```{r}
+heatmaps <- list()
+
+for (i in seq_along(stations)) {
+  station <- stations[i]
+
+  lfc_cols <- res_pair %>% 
+    select(starts_with("lfc_")) %>%
+    select(contains(station)) %>%
+    colnames()
+
+  diff_cols <- gsub("lfc_", "diff_", lfc_cols)
+
+  hmcols <- lfc_cols %>%
+    str_remove("^lfc_") %>%
+    str_remove(paste0("_?station", station, "_?")) %>% 
+    str_remove("station")
+
+  hmcols <- station_names[hmcols]
+  hmcols[is.na(hmcols)] <- ref_station
+
+  lfc_mat <- res_pair %>%
+    select(Species, all_of(lfc_cols)) %>%
+    column_to_rownames("Species") %>%
+    as.matrix()
+
+  diff_mat <- res_pair %>%
+    select(Species, all_of(diff_cols)) %>%
+    column_to_rownames("Species") %>%
+    as.matrix()
+
+  colnames(lfc_mat) <- hmcols
+  colnames(diff_mat) <- hmcols
+  lfc_mat <- lfc_mat[rownames(diff_mat), ]
+
+  hmap <- Heatmap(lfc_mat,
+                  name = paste0("LFC_", station),  # Unique name
+                  col = colorRamp2(c(-3, 0, 3), c("blue", "white", "red")),
+                  cluster_columns = FALSE,
+                  cluster_rows = FALSE,
+                  show_column_names = TRUE,
+                  show_row_names = (i == 1),  # Only first heatmap shows row names
+                  column_title = station_names[station],
+                  column_names_rot = 15,
+                  row_names_side = "left",
+                  cell_fun = function(j, i, x, y, w, h, fill) {
+                    if (!is.na(diff_mat[i, j]) && diff_mat[i, j]) {
+                      grid.text("*", x, y, gp = gpar(fontsize = 14))
+                    }
+                  })
+  
+  heatmaps[[station]] <- hmap
+}
+
+# Combine all
+draw(Reduce(`+`, heatmaps), heatmap_legend_side = "right", merge_legend = TRUE)
+
+```
+
+```{r}
+# * * * Create columns * * *
+stations_ukr = c("kontraktova_ploshcha" = "Контрактова",
+                 "petrivka" = "Почайна",
+                 "heroiv_dnipra" = "Гер.Дніпра",
+                 "minska" = "Мінська",
+                 "maidan_nezalezhnosti" = "Майдан")
+
+lfc_cols <- res_pair %>% select(starts_with("lfc_")) %>% colnames()
+
+diff_cols <- gsub("lfc_", "diff_", lfc_cols)
+
+hm_cols <- lfc_cols %>% 
+  str_remove("lfc_station") %>% 
+  str_replace("_station", " - ") %>% 
+  if_else(!grepl(" - ", .), paste0(., " - heroiv_dnipra"), .)
+
+hm_cols <- sapply(hm_cols, USE.NAMES = F, function(x) str_replace_all(x, stations_ukr))
+
+# * * * Create matrices * * *
+lfc_mat <- res_pair %>%
+  select(Species, all_of(lfc_cols)) %>%
+  column_to_rownames("Species") %>%
+  as.matrix()
+
+diff_mat <- res_pair %>%
+  select(Species, all_of(diff_cols)) %>%
+  column_to_rownames("Species") %>%
+  as.matrix()
+
+colnames(lfc_mat) <- hm_cols
+colnames(diff_mat) <- hm_cols
+lfc_mat <- lfc_mat[rownames(diff_mat), ]
+```
+
+```{r fig.width = 10, fig.height = 5}
+
+# * * * Plot the heatmap * * *
+cairo_pdf(file = "figures/ancombc2.stations.pairwise-test.pdf",   # The directory you want to save the file in
+    width = 10, # The width of the plot in inches
+    height = 4.5) # The height of the plot in inches
+
+Heatmap(lfc_mat,
+                name = "LFC",
+                col = colorRamp2(c(-3, 0, 3), c("blue", "white", "red")),
+                cluster_columns = FALSE, cluster_rows = FALSE,
+                show_column_names = TRUE,
+                show_row_names = TRUE,
+                column_title = "ANCOMBC2: Pairwise тест між станціями",
+                column_names_rot = 20,
+         width = unit(180, "mm"), height = unit(72, "mm"),
+                row_names_side = "left",
+                cell_fun = function(j, i, x, y, w, h, fill) {
+                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j]) {
+                    grid.text("*", x, y, gp = gpar(fontsize = 14))
+                  }
+                })
+
+dev.off()
+```
+
+## DA station_specific
+
+```{r}
+pseq <- readRDS(file = "out/DA_analysis/pseq.rds")
+```
+
+```{r}
+out <- ancombc2(pseq, fix_formula = "station_specific",
+                #group = "station_specific",
+                #tax_level = "Species",
+                #struc_zero = TRUE,
+                neg_lb = FALSE,
+                p_adj_method = "holm",
+                verbose = TRUE,
+                pseudo_sens = TRUE,
+                global = FALSE, pairwise = FALSE, dunnet = FALSE)
+```
+
+```{r}
+#saveRDS(out, file = "out/DA_analysis/ANCOMBC2.station_specific-res.rds")
+out <- readRDS("out/DA_analysis/ANCOMBC2.station_specific-res.rds")
+```
+
+```{r eval=FALSE, include=FALSE}
+# reference level -- station
+addWorksheet(wb, "station_specificcar")
+
+out$res %>% 
+  filter(diff_station_specificcar) %>% 
+  merge(ktax, by.x = "taxon", by.y = 0, all.x = T) %>%
+  select("Family", "Species", "q_station_specificcar",
+         "diff_station_specificcar" , "passed_ss_station_specificcar") %>%
+  arrange(desc(passed_ss_station_specificcar)) %>%
+  mutate_if(is.numeric, ~formatC(., digits = 1, format = "e")) %>% 
+  rename("Родина" = Family,
+         "Вид" = Species,
+         "P-значення" = q_station_specificcar,
+         "Диф.розповсюджений" = diff_station_specificcar,
+         "Пройшов SS" = passed_ss_station_specificcar) %>% 
+  writeData(wb, sheet = "station_specificcar", x = .)
+
+saveWorkbook(wb, "out/DA_analysis/ANCOMBC_res.xlsx", overwrite = T)
+```
+
+## DA surface_material
+
+```{r}
+pseq <- readRDS(file = "out/DA_analysis/pseq.rds")
+```
+
+```{r}
+table(pseq@sam_data[["surface_material"]])
+```
+
+```{r}
+pseq_subs <-
+  subset_samples(pseq,surface_material %in% c("metal", "plastic", "wood"))
+pseq_subs
+```
+
+
+```{r}
+out <- ancombc2(pseq_subs,
+                   fix_formula = "surface_material",
+                   group = "surface_material",
+                   #tax_level = "Species",
+                   struc_zero = TRUE,
+                   neg_lb = FALSE,
+                   p_adj_method = "holm",
+                   verbose = TRUE,
+                   pseudo_sens = TRUE,
+                   global = TRUE, pairwise = TRUE, dunnet = FALSE)
+```
+
+```{r}
+saveRDS(out, file = "out/DA_analysis/ANCOMBC2.surface_material-res.rds")
+
+out <- readRDS(file = "out/DA_analysis/ANCOMBC2.surface_material-res.rds")
+```
+
+```{r}
+wb <- loadWorkbook("out/DA_analysis/ANCOMBC_res.xlsx")
+addWorksheet(wb, "surface_material_global")
+
+out$res_global %>% filter(diff_abn) %>% 
+  merge(ktax, by.x = "taxon", by.y = 0, all.x = T) %>%
+  select("Family", "Species", "q_val", "diff_abn" , "passed_ss") %>% 
+  mutate_if(is.numeric, ~formatC(., digits = 1, format = "e")) %>% 
+  rename("Родина" = Family,
+         "Вид" = Species,
+         "P-значення" = q_val,
+         "Диф.розповсюджений" = diff_abn,
+         "Пройшов SS" = passed_ss) %>% 
+  writeData(wb, sheet = "surface_material_global", x = .)
+
+saveWorkbook(wb, "out/DA_analysis/ANCOMBC_res.xlsx", overwrite = T)
+```
+
+```{r}
+out$res_pair %>% 
+  filter(if_any(starts_with("diff_"), ~.x))
+```
+
+
+```{r}
+res_pair <- 
+out$res_pair %>%
+  filter(if_any(starts_with("diff_"), ~ .x == TRUE)) %>%
+  merge(ktax, by.x = "taxon", by.y = 0, all.x = T)
+
+#addWorksheet(wb, "surface_material_pair")
+res_pair %>% 
+  filter(if_any(starts_with("diff_"), ~.x)) %>% 
+  writeData(wb, sheet = "surface_material_pair", x = .)
+saveWorkbook(wb, "out/DA_analysis/ANCOMBC_res.xlsx", overwrite = T)
+```
+
+```{r}
+# * * * Create columns * * *
+materials_ukr = c("metal" = "метал",
+                  "plastic" = "пластик",
+                  "wood" = "дерево")
+
+lfc_cols <- res_pair %>% select(starts_with("lfc_")) %>% colnames()
+
+diff_cols <- gsub("lfc_", "diff_", lfc_cols)
+
+hm_cols <- lfc_cols %>% 
+  str_remove("lfc_surface_material") %>% 
+  str_replace("_surface_material", " - ") %>% 
+  if_else(!grepl(" - ", .), paste0(., " - metal"), .)
+
+hm_cols <- sapply(hm_cols, USE.NAMES = F, function(x) str_replace_all(x, materials_ukr))
+
+# * * * Create matrices * * *
+lfc_mat <- res_pair %>%
+  select(Species, all_of(lfc_cols)) %>%
+  column_to_rownames("Species") %>%
+  as.matrix()
+
+diff_mat <- res_pair %>%
+  select(Species, all_of(diff_cols)) %>%
+  column_to_rownames("Species") %>%
+  as.matrix()
+
+colnames(lfc_mat) <- hm_cols
+colnames(diff_mat) <- hm_cols
+lfc_mat <- lfc_mat[rownames(diff_mat), ]
+```
+
+```{r fig.width = 6.5, fig.height = 8}
+
+# * * * Plot the heatmap * * *
+cairo_pdf(file = "figures/ancombc2.surface_material.pairwise-test.pdf",
+    width = 6.5, # The width of the plot in inches
+    height = 8) # The height of the plot in inches
+
+# shorten the name of the species
+row_labels <- rownames(lfc_mat)
+row_labels[row_labels == "Spiroplasma endosymbiont of Diplazon laetatorius"] <- "Spiroplasma endosymbiont"
+
+Heatmap(lfc_mat,
+                name = "LFC",
+                col = colorRamp2(c(-3, 0, 3), c("blue", "white", "red")),
+                cluster_columns = FALSE, cluster_rows = FALSE,
+                show_column_names = TRUE,
+                show_row_names = TRUE,
+        row_labels = row_labels,
+                column_title = "ANCOMBC2: Pairwise тест між матеріалами",
+                column_names_rot = 10,
+        #column_names_centered = TRUE,
+         width = unit(89, "mm"), height = unit(180, "mm"),
+                row_names_side = "left",
+                cell_fun = function(j, i, x, y, w, h, fill) {
+                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j]) {
+                    grid.text("*", x, y, gp = gpar(fontsize = 14))
+                  }
+                })
+
+dev.off()
+```
+
+## DA suface
+
+```{r}
+pseq <- readRDS(file = "out/DA_analysis/pseq.rds")
+```
+
+```{r}
+table(pseq@sam_data[["surface"]])
+```
+
+```{r}
+pseq_subs <-
+  subset_samples(pseq, surface %in% c("bench", "entrance_door", "handrail", "ticket_machine"))
+
+pseq_subs
+```
+
+
+```{r}
+out <- ancombc2(pseq_subs,
+                   fix_formula = "surface",
+                   group = "surface",
+                   #tax_level = "Species",
+                   struc_zero = TRUE,
+                   neg_lb = FALSE,
+                   p_adj_method = "holm",
+                   verbose = TRUE,
+                   pseudo_sens = TRUE,
+                   global = TRUE, pairwise = TRUE, dunnet = FALSE)
+```
+
+```{r}
+saveRDS(out, file = "out/DA_analysis/ANCOMBC2.surface-res.rds")
+
+out <- readRDS(file = "out/DA_analysis/ANCOMBC2.surface-res.rds")
+```
+
+```{r}
+wb <- loadWorkbook("out/DA_analysis/ANCOMBC_res.xlsx")
+addWorksheet(wb, "surface_global")
+
+out$res_global %>% filter(diff_abn) %>% 
+  merge(ktax, by.x = "taxon", by.y = 0, all.x = T) %>%
+  select("Family", "Species", "q_val", "diff_abn" , "passed_ss") %>% 
+  mutate_if(is.numeric, ~formatC(., digits = 1, format = "e")) %>% 
+  rename("Родина" = Family,
+         "Вид" = Species,
+         "P-значення" = q_val,
+         "Диф.розповсюджений" = diff_abn,
+         "Пройшов SS" = passed_ss) %>% 
+  writeData(wb, sheet = "surface_global", x = .)
+
+saveWorkbook(wb, "out/DA_analysis/ANCOMBC_res.xlsx", overwrite = T)
+```
+
+```{r}
+out$res_pair %>% 
+  filter(if_any(starts_with("diff_"), ~.x))
+```
+
+```{r}
+res_pair <- 
+out$res_pair %>%
+  filter(if_any(starts_with("diff_"), ~ .x == TRUE)) %>%
+  merge(ktax, by.x = "taxon", by.y = 0, all.x = T)
+
+addWorksheet(wb, "surface_pair")
+writeData(wb, sheet = "surface_pair", x = res_pair)
+saveWorkbook(wb, "out/DA_analysis/ANCOMBC_res.xlsx", overwrite = T)
+```
