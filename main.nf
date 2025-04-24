@@ -12,6 +12,7 @@ params.kmer_len = 35
 params.read_len = 150
 params.classif_lvl = "S"
 params.bracken_thresh = 10
+params.card_local_db = "/home/lbombini/metasub-kyiv-eda/localDB"
 
 // Output directory
 params.outdir = "${projectDir}/out"
@@ -222,6 +223,39 @@ process TAXONKIT {
 
 }
 
+/*
+ * Run Resistance Gene Identifier on trimmed reads
+ */
+process RGI {
+
+    memory '16 GB'   // or bump to 32 GB if needed
+    cpus 16 
+    
+    conda "bioconda::rgi=6.0.3"
+    publishDir "${params.outdir}/AMR-analysis/", mode: "symlink"
+
+    input:
+        tuple val(sample_id), path(read1), path(read2) 
+
+    output:
+        tuple path("${sample_id}.sorted.length_100.bam"), path("${sample_id}.sorted.length_100.bam.bai"), emit: bam_bai
+        path("${sample_id}.allele_mapping_data.json")
+        path("${sample_id}.gene_mapping_data.txt")
+        path("${sample_id}.allele_mapping_data.txt") 
+        path("${sample_id}.overall_mapping_stats.txt") 
+        path("${sample_id}.artifacts_mapping_stats.txt") 
+        path("${sample_id}.reference_mapping_stats.txt") 
+
+    beforeScript "ln -s ${params.card_local_db}"
+
+    script:
+    """
+    rgi bwt -1 ${read1} -2 ${read2} -a kma -n 16 \
+        -o ${sample_id} --clean --local --include_wildcard
+    """
+    //additional filters --mapq MAPQ --mapped MAPPED --coverage COVERAGE
+}
+
 workflow{
     
     // input channel for the paired-end samples
@@ -239,5 +273,7 @@ workflow{
     BRACKEN_MULTIQC(bracken_ch.reports.collect( t -> t[1]))
 
     TAXONKIT(comb_bracken_ch.out)
+
+    RGI(fastp_ch.trimmed_reads)
 }
 

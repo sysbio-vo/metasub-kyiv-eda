@@ -1,0 +1,154 @@
+---
+title: "rgi-viz"
+output: html_document
+params:
+  mapq_thresh: 100
+  coverage_thresh: 75
+  numreads_thresh: 5000
+---
+
+```{r}
+pacman::p_load(dplyr, ggplot2, ComplexHeatmap)
+
+gmd <- read.delim("all-stations.gene_mapping_data.txt")
+
+meta <- read.csv("data/complete_metadata.csv") %>% 
+  filter(city == "kyiv",
+         !(station %in% c("busstop_20", "")),
+         uuid %in% unique(gmd$id)) %>% 
+  select_if(sapply(., function(x) !all(is.na(x)), USE.NAMES = F))
+
+```
+
+# Coverage VS Mapped reads plot
+
+```{r}
+plot_coverage_numreads <- function(rgi_out,
+                               mapq_thresh = 100,
+                               coverage_thresh = 75,
+                               numreads_thresh = 5000){
+  rgi_out %>%
+  filter(Average.MAPQ..Completely.Mapped.Reads. > mapq_thresh) %>%
+  mutate(
+    thresh_group = case_when(
+      All.Mapped.Reads > numreads_thresh & Average.Percent.Coverage > coverage_thresh ~ "both",
+      All.Mapped.Reads > numreads_thresh ~ "numreads_pass",
+      Average.Percent.Coverage > coverage_thresh ~ "coverage_pass",
+      TRUE ~ "fail")
+    ) %>%
+  ggplot(aes(x = All.Mapped.Reads,
+             y = Average.Percent.Coverage,
+             color = thresh_group)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_vline(xintercept = numreads_thresh, linetype = "dashed", color = "gray40") +
+  geom_hline(yintercept = coverage_thresh, linetype = "dashed", color = "gray40") +
+  scale_color_manual(values = c("both" = "green", 
+                                "numreads_pass" = "blue", 
+                                "coverage_pass" = "orange", 
+                                "fail" = "gray")) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "All Mapped Reads",
+       y = "Average % Coverage",
+       title = "")
+}
+```
+
+```{r fig.height=8}
+
+plot_coverage_numreads(gmd,
+                       mapq_thresh = params$mapq_thresh,
+                       coverage_thresh = params$coverage_thresh,
+                       numreads_thresh = params$numreads_thresh) +
+  facet_wrap(vars(station))
+```
+
+# Heatmap AMR x Sample coverage %
+
+```{r}
+# a list of AR terms that passed the filter for at least a single sample
+aroterms <- gmd %>% filter(Average.MAPQ..Completely.Mapped.Reads. > params$mapq_thresh &
+               (Completely.Mapped.Reads > params$numreads_thresh |
+               Average.Percent.Coverage > params$coverage_thresh)) %>% 
+  pull(ARO.Term)
+
+gmd %>% filter(duplicated(gmd$ARO.Term))
+```
+
+```{r coverage matrix}
+covmat <- gmd %>% filter(ARO.Term %in% aroterms) %>% select(ARO.Term, id, Average.Percent.Coverage) %>%
+  tidyr::pivot_wider(names_from = ARO.Term, values_from = Average.Percent.Coverage) %>% 
+  tibble::column_to_rownames(var = "id") %>%
+  data.matrix()
+```
+
+```{r row and col annots}
+row_annot <- HeatmapAnnotation(which = "row",
+    "Станція" = meta[match(rownames(covmat), meta$uuid), "station"])
+
+# annotation df for amr genes
+aroannot_df <- gmd %>%
+  distinct(ARO.Term, .keep_all = TRUE) %>%
+  filter(ARO.Term %in% colnames(covmat))
+
+col_annot <- HeatmapAnnotation(which = "column",
+    "Механізм резистентності" = aroannot_df[match(colnames(covmat), aroannot_df$ARO.Term), "Resistance.Mechanism"])
+```
+
+```{r}
+Heatmap(covmat, cluster_rows = F, cluster_columns = F, name = "Покриття, %",
+        right_annotation = row_annot, top_annotation = col_annot,
+        show_row_names = F)
+
+#draw(hm, column_title = "Кількість прочитань")
+```
+- [] renames resistance mechanism
+- [] rename stations
+- [] move annotation labels from legend to the bar
+- [] order by col annot
+- [] add barplot to columns (number of AMRs identified)
+- [] recolor
+
+
+```{r}
+# Match stations to rownames in covmat
+stations <- meta[match(rownames(covmat), meta$uuid), "station"]
+station_colors <- setNames(rainbow(length(unique(stations))), unique(stations))
+
+mechs <- aroannot_df[match(colnames(covmat), aroannot_df$ARO.Term), "Resistance.Mechanism"]
+mech_colors <- setNames(rainbow(length(unique(mechs))), unique(mechs))
+  
+  
+row_annot <- rowAnnotation(
+  Станція = anno_block(
+    gp = gpar(fill = station_colors),
+    labels = names(station_colors),
+    labels_gp = gpar(fontsize = 10),
+    labels_rot = 90,
+    width = unit(5, "mm")
+  )
+)
+
+col_annot <- HeatmapAnnotation(
+  "Механізм резистентності" = anno_block(
+    gp = gpar(fill = mech_colors),
+    labels = names(mech_colors),
+    labels_gp = gpar(fontsize = 10),
+    labels_rot = 0,
+    width = unit(5, "mm")
+  )
+)
+
+# Final heatmap with row split
+Heatmap(covmat,
+        cluster_rows = FALSE, cluster_columns = FALSE,
+        name = "Покриття, %",
+        split = stations,
+        column_split = mechs,
+        right_annotation = row_annot,
+        top_annotation = col_annot,
+        show_row_names = FALSE,
+        row_title = NULL, column_title = NULL)
+
+```
+
