@@ -8,7 +8,7 @@
 params.reads_exp = "data/haib*_{1,2}.fastq.gz"
 params.krakenDB = "~/krakenDBs/standard8DB"
 params.threads = 20
-params.kmer_len = 35
+params.kmer_len = 35 
 params.read_len = 150
 params.classif_lvl = "S"
 params.bracken_thresh = 10
@@ -238,8 +238,8 @@ process RGI {
         tuple val(sample_id), path(read1), path(read2) 
 
     output:
-        tuple path("${sample_id}.sorted.length_100.bam"), path("${sample_id}.sorted.length_100.bam.bai"), emit: bam_bai
-        path("${sample_id}.allele_mapping_data.json")
+        //tuple path("${sample_id}.sorted.length_100.bam"), path("${sample_id}.sorted.length_100.bam.bai")
+        //path("${sample_id}.allele_mapping_data.json")
         path("${sample_id}.gene_mapping_data.txt")
         path("${sample_id}.allele_mapping_data.txt") 
         path("${sample_id}.overall_mapping_stats.txt") 
@@ -252,6 +252,10 @@ process RGI {
     """
     rgi bwt -1 ${read1} -2 ${read2} -a kma -n 16 \
         -o ${sample_id} --clean --local --include_wildcard
+
+    rm -f ${sample_id}.sorted.length_100.bam
+    rm -f ${sample_id}.sorted.length_100.bam.bai
+    rm -f ${sample_id}.allele_mapping_data.json
     """
     //additional filters --mapq MAPQ --mapped MAPPED --coverage COVERAGE
 }
