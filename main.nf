@@ -8,7 +8,7 @@
 params.reads_exp = "data/haib*_{1,2}.fastq.gz"
 params.krakenDB = "~/krakenDBs/standard8DB"
 params.threads = 20
-params.kmer_len = 35 
+params.kmer_len = 35
 params.read_len = 150
 params.classif_lvl = "S"
 params.bracken_thresh = 10
@@ -218,7 +218,7 @@ process TAXONKIT {
 
     script:
     """
-    cut -f 2 ${combined_bracken} | tail -n+2 | taxonkit reformat -I 1 -f "{k}\t{p}\t{c}\t{o}\t{f}\t{g}\t{s}\t{t}" > taxtable.tsv
+    cut -f 2 ${combined_bracken} | tail -n+2 | taxonkit reformat2 -I 1 -f "{cellular root|acellular root}\t{domain}\t{kingdom}\t{phylum}\t{class}\t{order}\t{family}\t{genus}\t{species}\t{subspecies|strain|no rank}" > taxtable.tsv
     """
 
 }
