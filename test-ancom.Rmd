@@ -28,6 +28,8 @@ library(dplyr)
 library(tibble)
 library(vegan)
 library(Cairo)
+library(usedist)
+library(stringr)
 
 # extract taxid identified to filter taxonomy table
 taxids <- read.delim(params$abundtable) %>% pull(taxonomy_id)
@@ -41,11 +43,92 @@ meta <- read.csv(params$metadata) %>%
   filter(uuid %in% colnames(abund_df)) %>% 
   column_to_rownames("uuid")
 
+ktax_cols <- c("taxid", "root", "domain", "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Subspecies")
 ktax <- read.delim(params$taxtable, header = F,
-                   col.names = c("taxid",  "Kingdom", "Phylum", "Class",
-                                 "Order", "Family", "Genus", "Species", 
-                                 "Subspecies")) %>% 
+                   col.names = ktax_cols) %>% 
   column_to_rownames("taxid")
+```
+
+# Permanova
+
+```{r}
+nreads_df <- 
+abund_df %>%
+  tibble::rownames_to_column(var = "taxid") %>% 
+  tidyr::pivot_longer(!taxid) %>%
+  tidyr::pivot_wider(names_from = taxid, values_from = value) %>%
+  tibble::column_to_rownames(var = "name")
+head(nreads_df, 2)
+```
+## Between stations
+
+```{r}
+# Bray-Curtis (abundance-based)
+bray_dist <- vegdist(nreads_df, method = "bray", na.rm = TRUE)
+# Permanova on Bray-Curtis dissimilarity matrix
+adonis2(bray_dist ~ station, data = meta, permutations = 999)
+```
+
+```{r}
+# Jaccard (presence/absence)
+binary_matrix <- as.data.frame((nreads_df > 0) * 1)
+binary_matrix[is.na(binary_matrix)] <- 0
+jaccard_dist <- vegdist(binary_matrix, method = "jaccard", na.rm = TRUE)
+
+adonis2(jaccard_dist ~ station, data = meta, permutations = 999)
+```
+
+W/o car samples
+
+```{r}
+station_samples <- meta %>% filter(station_specific != "car") %>% rownames()
+adonis2(dist_subset(bray_dist, station_samples) ~ station,
+        data = meta[station_samples, ], permutations = 999)
+```
+
+```{r}
+adonis2(dist_subset(jaccard_dist, station_samples) ~ station,
+        data = meta[station_samples, ], permutations = 999)
+```
+
+## Surfaces
+
+```{r}
+meta %>%
+  filter(#surface %in% c("bench", "entrance_door", "handrail", "ticket_machine"),
+         station_specific == "car")
+```
+
+Only the surfaces with at least 11 samples are tested.
+
+```{r}
+surface_subs <- meta %>%
+  filter(surface %in% c("bench", "entrance_door", "handrail", "ticket_machine")) %>% 
+  rownames()
+
+adonis2(dist_subset(bray_dist, surface_subs) ~ surface,
+        data = meta[surface_subs, ], permutations = 999)
+```
+
+```{r}
+adonis2(dist_subset(jaccard_dist, surface_subs) ~ surface,
+        data = meta[surface_subs, ], permutations = 999)
+```
+
+## Material
+
+```{r}
+material_subs <- meta %>%
+  filter(surface_material %in% c("metal", "plastic", "wood")) %>% 
+  rownames()
+
+adonis2(dist_subset(bray_dist, material_subs) ~ surface_material,
+        data = meta[material_subs, ], permutations = 999)
+```
+
+```{r}
+adonis2(dist_subset(jaccard_dist, material_subs) ~ surface_material,
+        data = meta[material_subs, ], permutations = 999)
 ```
 
 # Identify the main clusters
@@ -239,6 +322,7 @@ stations_ukr = c("kontraktova_ploshcha" = "Контрактова",
 lfc_cols <- res_pair %>% select(starts_with("lfc_")) %>% colnames()
 
 diff_cols <- gsub("lfc_", "diff_", lfc_cols)
+ss_cols <- gsub("lfc_", "passed_ss_", lfc_cols)
 
 hm_cols <- lfc_cols %>% 
   str_remove("lfc_station") %>% 
@@ -258,9 +342,17 @@ diff_mat <- res_pair %>%
   column_to_rownames("Species") %>%
   as.matrix()
 
+ss_mat <- res_pair %>%
+  select(Species, all_of(ss_cols)) %>%
+  column_to_rownames("Species") %>%
+  as.matrix()
+
 colnames(lfc_mat) <- hm_cols
 colnames(diff_mat) <- hm_cols
+colnames(ss_mat) <- hm_cols
+
 lfc_mat <- lfc_mat[rownames(diff_mat), ]
+ss_mat <- ss_mat[rownames(ss_mat), ]
 ```
 
 ```{r fig.width = 10, fig.height = 5}
@@ -272,7 +364,7 @@ cairo_pdf(file = "figures/ancombc2.stations.pairwise-test.pdf",   # The director
 
 Heatmap(lfc_mat,
                 name = "LFC",
-                col = colorRamp2(c(-3, 0, 3), c("blue", "white", "red")),
+                col = colorRamp2(c(-3, 0, 3), c("#26576f", "white", "#8a2f2f")),
                 cluster_columns = FALSE, cluster_rows = FALSE,
                 show_column_names = TRUE,
                 show_row_names = TRUE,
@@ -281,8 +373,11 @@ Heatmap(lfc_mat,
          width = unit(180, "mm"), height = unit(72, "mm"),
                 row_names_side = "left",
                 cell_fun = function(j, i, x, y, w, h, fill) {
-                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j]) {
-                    grid.text("*", x, y, gp = gpar(fontsize = 14))
+                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && !ss_mat[i, j]) {
+                    grid.text("*", x, y, gp = gpar(fontsize = 10))
+                  }
+                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && ss_mat[i, j]) {
+                    grid.text("**", x, y, gp = gpar(fontsize = 10))
                   }
                 })
 
@@ -364,7 +459,7 @@ out <- ancombc2(pseq_subs,
 ```
 
 ```{r}
-saveRDS(out, file = "out/DA_analysis/ANCOMBC2.surface_material-res.rds")
+#saveRDS(out, file = "out/DA_analysis/ANCOMBC2.surface_material-res.rds")
 
 out <- readRDS(file = "out/DA_analysis/ANCOMBC2.surface_material-res.rds")
 ```
@@ -392,13 +487,14 @@ out$res_pair %>%
   filter(if_any(starts_with("diff_"), ~.x))
 ```
 
-
 ```{r}
 res_pair <- 
 out$res_pair %>%
   filter(if_any(starts_with("diff_"), ~ .x == TRUE)) %>%
   merge(ktax, by.x = "taxon", by.y = 0, all.x = T)
+```
 
+```{r}
 #addWorksheet(wb, "surface_material_pair")
 res_pair %>% 
   filter(if_any(starts_with("diff_"), ~.x)) %>% 
@@ -415,6 +511,7 @@ materials_ukr = c("metal" = "метал",
 lfc_cols <- res_pair %>% select(starts_with("lfc_")) %>% colnames()
 
 diff_cols <- gsub("lfc_", "diff_", lfc_cols)
+ss_cols <- gsub("lfc_", "passed_ss_", lfc_cols)
 
 hm_cols <- lfc_cols %>% 
   str_remove("lfc_surface_material") %>% 
@@ -434,9 +531,17 @@ diff_mat <- res_pair %>%
   column_to_rownames("Species") %>%
   as.matrix()
 
+ss_mat <- res_pair %>%
+  select(Species, all_of(ss_cols)) %>%
+  column_to_rownames("Species") %>%
+  as.matrix()
+
 colnames(lfc_mat) <- hm_cols
 colnames(diff_mat) <- hm_cols
+colnames(ss_mat) <- hm_cols
+
 lfc_mat <- lfc_mat[rownames(diff_mat), ]
+ss_mat <- ss_mat[rownames(ss_mat), ]
 ```
 
 ```{r fig.width = 6.5, fig.height = 8}
@@ -452,6 +557,31 @@ row_labels[row_labels == "Spiroplasma endosymbiont of Diplazon laetatorius"] <- 
 
 Heatmap(lfc_mat,
                 name = "LFC",
+                col = colorRamp2(c(-3, 0, 3), c("#26576f", "white", "#8a2f2f")),
+                cluster_columns = FALSE, cluster_rows = FALSE,
+                show_column_names = TRUE,
+                show_row_names = TRUE,
+        row_labels = row_labels,
+                column_title = "ANCOMBC2: Pairwise тест між матеріалами",
+                column_names_rot = 10,
+        #column_names_centered = TRUE,
+         width = unit(89, "mm"), height = unit(180, "mm"),
+                row_names_side = "left",
+                cell_fun = function(j, i, x, y, w, h, fill) {
+                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && !ss_mat[i, j]) {
+                    grid.text("*", x, y, gp = gpar(fontsize = 10))
+                    } else if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && ss_mat[i, j]) {
+                      grid.text("**", x, y, gp = gpar(fontsize = 10))
+                      }
+                })
+
+dev.off()
+```
+
+
+```{r fig.width = 6.5, fig.height = 8}
+Heatmap(lfc_mat,
+                name = "LFC",
                 col = colorRamp2(c(-3, 0, 3), c("blue", "white", "red")),
                 cluster_columns = FALSE, cluster_rows = FALSE,
                 show_column_names = TRUE,
@@ -463,8 +593,74 @@ Heatmap(lfc_mat,
          width = unit(89, "mm"), height = unit(180, "mm"),
                 row_names_side = "left",
                 cell_fun = function(j, i, x, y, w, h, fill) {
-                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j]) {
-                    grid.text("*", x, y, gp = gpar(fontsize = 14))
+                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && !ss_mat[i, j]) {
+                    grid.text("*", x, y, gp = gpar(fontsize = 10))
+                    } else if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && ss_mat[i, j]) {
+                      grid.text("**", x, y, gp = gpar(fontsize = 10))
+                      }
+                })
+```
+
+```{r}
+lfc_cols <- res_pair %>% select(starts_with("lfc_")) %>% colnames()
+
+diff_cols <- gsub("lfc_", "diff_", lfc_cols)
+ss_cols <- gsub("lfc_", "passed_ss_", lfc_cols)
+
+hm_cols <- lfc_cols %>% 
+  str_remove("lfc_station") %>% 
+  str_replace("_station", " - ") %>% 
+  if_else(!grepl(" - ", .), paste0(., " - heroiv_dnipra"), .)
+
+hm_cols <- sapply(hm_cols, USE.NAMES = F, function(x) str_replace_all(x, stations_ukr))
+
+# * * * Create matrices * * *
+lfc_mat <- res_pair %>%
+  select(Species, all_of(lfc_cols)) %>%
+  column_to_rownames("Species") %>%
+  as.matrix()
+
+diff_mat <- res_pair %>%
+  select(Species, all_of(diff_cols)) %>%
+  column_to_rownames("Species") %>%
+  as.matrix()
+
+ss_mat <- res_pair %>%
+  select(Species, all_of(ss_cols)) %>%
+  column_to_rownames("Species") %>%
+  as.matrix()
+
+colnames(lfc_mat) <- hm_cols
+colnames(diff_mat) <- hm_cols
+colnames(ss_mat) <- hm_cols
+
+lfc_mat <- lfc_mat[rownames(diff_mat), ]
+ss_mat <- ss_mat[rownames(ss_mat), ]
+```
+
+```{r fig.width = 10, fig.height = 5}
+
+# * * * Plot the heatmap * * *
+cairo_pdf(file = "figures/ancombc2.stations.pairwise-test.pdf",   # The directory you want to save the file in
+    width = 10, # The width of the plot in inches
+    height = 4.5) # The height of the plot in inches
+
+Heatmap(lfc_mat,
+                name = "LFC",
+                col = colorRamp2(c(-3, 0, 3), c("#26576f", "white", "#8a2f2f")),
+                cluster_columns = FALSE, cluster_rows = FALSE,
+                show_column_names = TRUE,
+                show_row_names = TRUE,
+                column_title = "ANCOMBC2: Pairwise тест між станціями",
+                column_names_rot = 20,
+         width = unit(180, "mm"), height = unit(72, "mm"),
+                row_names_side = "left",
+                cell_fun = function(j, i, x, y, w, h, fill) {
+                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && !ss_mat[i, j]) {
+                    grid.text("*", x, y, gp = gpar(fontsize = 10))
+                  }
+                  if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && ss_mat[i, j]) {
+                    grid.text("**", x, y, gp = gpar(fontsize = 10))
                   }
                 })
 

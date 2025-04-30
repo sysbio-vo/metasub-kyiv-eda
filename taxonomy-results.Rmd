@@ -1,0 +1,206 @@
+---
+title: "taxonomy-results"
+output: html_document
+
+params:
+  abundance_table: "out/taxonomy-analysis/combined_out.bracken"
+  taxonomy_table: "out/DA_analysis/taxtable.tsv"
+  pathogen_list: "CZ_ID_pathogen_list_2024.tsv"
+---
+
+```{r}
+abund <- read.delim(params$abundance_table) %>%
+  select(taxonomy_id, ends_with("filtered_num")) %>% 
+  rename(taxid = taxonomy_id) %>% 
+  rename_with(~ stringr::str_remove_all(.x, "haib17CEM5241_HMGMHCCXY_|\\.out\\.bracken\\.filtered_num$")) %>% 
+  tibble::column_to_rownames(var = "taxid")
+
+tax_categories = c(taxid = "ID таксону",
+                   root = "Корінь",
+                   domain = "Домен",
+                   kingdom = "Царство",
+                   phylum  = "Тип",
+                   class = "Клас",
+                   order = "Порядок",
+                   family = "Родина",
+                   genus = "Рід",
+                   species = "Вид",
+                   subspecies = "Підвид")
+
+taxt <- read.delim(params$taxonomy_table, header = F,
+                   col.names = names(tax_categories)) %>% 
+  tibble::column_to_rownames(var = "taxid")
+
+head(abund, 2)
+head(taxt, 2)
+```
+
+
+```{r}
+table(taxt$root)
+table(taxt$domain)
+```
+
+```{r}
+print("Reads, attributed to viruses")
+
+viral_reads <- abund %>%
+  merge(taxt, by = "row.names") %>%
+  filter(root == "Viruses") %>% 
+  select(where(is.numeric)) %>% 
+  colSums() %>% sum()
+
+tot_reads <- abund %>%
+  merge(taxt, by = "row.names") %>%
+  select(where(is.numeric)) %>% 
+  colSums() %>% sum()
+
+viral_reads / tot_reads * 100
+```
+
+```{r}
+prevstat <- abund %>%
+  mutate(
+    abund = rowSums(.),
+    prev = rowSums(. > 0),
+    prevperc = rowMeans(. > 0)*100) %>%
+  merge(taxt, by = "row.names") %>% 
+  select(species, abund, prevperc) %>% 
+  arrange(desc(abund)) 
+
+prevstat %>% 
+  mutate(abund = formatC(abund, digits = 1, format = "e"),
+         prevperc = formatC(prevperc, digits = 1, format = "f")) %>% 
+  head(21) %>% 
+  rename("Вид" = species,
+         "Кількість прочитань" = abund,
+         "Поширеність, % зразків" = prevperc,)
+```
+
+```{r}
+core_taxa <- prevstat %>% filter(prevperc == 100)
+core_taxa
+``` 
+
+Сет з 22 патогенів з присутністю в понад 90%
+```{r}
+pathogen_list <- read.delim(params$pathogen_list) %>% pull(., var = "taxon_name") %>% unique()
+
+prevstat %>% 
+  mutate(is_pathogen = if_else(species %in% pathogen_list, TRUE, FALSE)) %>% 
+  filter(is_pathogen) %>% 
+  arrange(desc(abund)) %>% 
+  filter(prevperc >= 90)
+```
+# Core taxa phylotree
+
+```{r}
+library(data.tree)
+library(ape)
+
+ktax_cols <- c("taxid", "root", "domain", "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Subspecies")
+                   
+# 1. Extract taxonomy
+tax_df <- read.delim("out/DA_analysis/taxtable.tsv", col.names = ktax_cols, header = F) %>%
+  filter(Species %in% core_taxa$species, domain == "Bacteria") %>% 
+  select("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+# 2. Build hierarchy
+lineages <- do.call(paste, c(list("Root"), tax_df, sep = "/"))
+
+#path_strings_fixed <- paste("Root", gsub(";", "/", path_strings), sep = "/")
+taxonomy_tree <- as.Node(data.frame(pathString = lineages))
+
+# 3. Convert to Newick format
+newick_string <- ToNewick(taxonomy_tree)
+
+# 4. Read the Newick string into a phylo object
+tree <- read.tree(text = newick_string)
+
+# 5. Plot the tree
+plot(tree, cex = 0.6)
+```
+```{r}
+library(ggtreeExtra)
+library(ggtree)
+library(dplyr)
+library(ggplot2)
+
+taxmeta <- read.csv("data/core-taxa-meta.csv") %>% 
+  mutate(Species = gsub(" ", "_", Species))
+taxmeta <- taxmeta[match(tree$tip.label, taxmeta$Species), ]
+rownames(taxmeta) <- taxmeta$Species
+taxmeta <- taxmeta %>% select(Group)
+
+palette <- c("#c5ae93", "#828cb4", "#45aad5", "#26576f", "#4c3c43")
+# If you know the specific group names, assign them explicitly:
+# names(group_colors) <- c("Group1", "Group2", "Group3", "Group4", "Group5")
+```
+
+```{r fig.width = 7, fig.height=7}
+cairo_pdf(file = "figures/core-taxa-lineage-tree.pdf",   # The directory you want to save the file in
+width = 7, # The width of the plot in inches
+    height = 7) # The height of the plot in inches
+
+# Basic tree
+p <- ggtree(tree, layout = "circular") +
+  geom_tiplab(size = 3, offset = 40) +
+  xlim(0, 225)
+
+# Heatmap with custom colors and no legend title
+gheatmap(
+  p,
+  taxmeta,
+  offset = 0,
+  width = 0.2,
+  colnames = FALSE,  # <- removes "Group" label above ring
+  color = "black"
+) +
+  scale_fill_manual(
+    values = palette,
+    guide = guide_legend(title = NULL)  # <- removes legend title
+  ) +
+  theme(
+    legend.text = element_text(size = 9),
+    #legend.position = "left",
+    legend.position = c(0.13, 0.1),
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "transparent", color = NA),
+    #legend.key.size = unit(0.08, "in")
+  )
+dev.off()
+```
+
+```{r, fig.height= 20}
+core_ind
+
+
+abund %>% merge(taxt, by = "row.names") %>% 
+  filter((species %in% core_taxa$species) &
+           (species != "Homo sapiens")) %>% 
+  select(species, starts_with("SL")) %>% 
+  tidyr::pivot_longer(-species, names_to = "sample_id", values_to = "abund") %>% 
+  ggplot(aes(x = abund)) +
+  geom_density(fill = "steelblue", alpha = 0.6) +
+  facet_wrap(~ species, ncol = 2, scales = "fixed") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(hjust = 0),         # Left-align species labels
+    strip.placement = "outside",
+    axis.title.y = element_blank(),
+    axis.text.y=element_blank(),
+    axis.ticks.y=element_blank()
+  ) +
+  labs(
+    title = "Abundance Density per Species",
+    x = "Abundance",
+    y = "Density"
+  )
+
+  
+  
+```
+
+
+
+

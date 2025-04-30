@@ -33,13 +33,7 @@ meta <- read.csv("data/complete_metadata.csv") %>%
          station = stringr::str_to_title(gsub("_", " ", station))) %>% 
   filter(!(id %in% id[duplicated(id)])) %>% 
   tibble::column_to_rownames(var = "idcopy")
-  
-  
-meta %>% filter(id %in% id[duplicated(id)]) %>% 
-  select(uuid, id, surface, surface_material, station) %>% View()
 ```
-
-[!!!] Is there a difference between these duplicates?
 
 ```{r}
 pcadata <- bracken %>% 
@@ -114,6 +108,15 @@ ggplot(data = pca_norm_filt, aes(x=PC1, y=PC2, colour = factor(station))) +
 
 # Bracken out stacked bar
 
+## All samples
+
+```{r}
+bracken %>% colnames()
+```
+
+
+## By station
+
 ```{r}
 famsums <- bracken %>% group_by(Family) %>% 
   summarize(across(
@@ -149,8 +152,6 @@ ggplot(famsums_long, aes(fill = Family, y = count, x = sample)) +
         legend.title = element_blank()  # Remove legend title for a cleaner look
     ) + facet_wrap(vars(station), scales = "free")
 ```
-
-- [] ? sort by human reads
 
 # The disctribution of unclassified reads
 
@@ -195,36 +196,6 @@ p2 <- percreads <- ggplot(bardata, aes(fill=name, y=id, x=value)) +
 p1 + p2 + 
   plot_layout(guides = "collect", axes = "collect_y") &
   theme(legend.position = "bottom")
-```
-
-
-# Jaccard distance heatmap on PCA
-
-```{r}
-distm <- select_if(pcadata_annot, is.numeric) %>% vegdist(method = "jaccard")
-distm <- as.matrix(distm)
-dim(as.matrix(distm))
-
-colnames(distm) <- rownames(annotdf)
-rownames(distm) <- rownames(annotdf)
-
-```
-
-```{r}
-annotdf <- read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/kraken-top-n-plot_Species.txt",
-           check.names = F) %>%
-  mutate(id = word(Sample, 3, sep = "_")) %>% 
-  select("id", "Homo sapiens", "Unclassified") %>% 
-  left_join(meta)
-```
-
-```{r}
-pheatmap(as.matrix(distm),
-         annotation_col = select(annotdf, surface_material),
-         show_rownames = TRUE,
-         show_colnames = TRUE,
-         clustering_distance_rows = "euclidean",
-         clustering_distance_cols = "euclidean")
 ```
 
 # Jaccard distance heatmap on Bracken out

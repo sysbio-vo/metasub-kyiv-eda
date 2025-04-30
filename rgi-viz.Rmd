@@ -8,26 +8,48 @@ params:
 ---
 
 ```{r}
-pacman::p_load(dplyr, ggplot2, ComplexHeatmap)
+colors = c("#8a2f2f",
+           "#c5ae93", "#eda8b7", "#828cb4", "#45aad5", "#26576f", "#5468ba", "#e06781", "#a98760", "#36837e")
+
+colors[2:10]
+```
+
+
+```{r}
+pacman::p_load(dplyr, ggplot2, ComplexHeatmap, vegan, usedist, tidyr, circlize)
 
 gmd <- read.delim("all-stations.gene_mapping_data.txt")
 
-meta <- read.csv("data/complete_metadata.csv") %>% 
-  filter(city == "kyiv",
-         !(station %in% c("busstop_20", "")),
-         uuid %in% unique(gmd$id)) %>% 
-  select_if(sapply(., function(x) !all(is.na(x)), USE.NAMES = F))
+meta <- read.csv("data/clean_metadata.csv") %>% 
+  filter(uuid %in% unique(gmd$id)) %>% 
+  tibble::column_to_rownames(var = "uuid")
+
+mechanisms <- c("antibiotic target alteration" = "зміна мішені", "antibiotic inactivation" = "інактивація", "antibiotic efflux" = "виведення", "antibiotic target alteration; antibiotic target replacement" = "зміна + заміна мішені", "reduced permeability to antibiotic" = "зниження проникності", "antibiotic target protection" = "захист мішені", "antibiotic target replacement" = "заміна мішені", "antibiotic efflux; reduced permeability to antibiotic" = "виведення + зн.проник.", "antibiotic target alteration; antibiotic efflux" = "зміна мішені + виведення")
+
+arometa <- gmd %>%
+  select(ARO.Term, Resistance.Mechanism, AMR.Gene.Family, Drug.Class) %>% 
+  filter(!duplicated(.)) %>% arrange(ARO.Term) %>% 
+  tibble::column_to_rownames(var = "ARO.Term") %>% 
+  mutate("Механізм резистентності" = mechanisms[arometa$Resistance.Mechanism])
+
+abund <- gmd %>%
+  select(ARO.Term, Completely.Mapped.Reads, id) %>%
+  tidyr::pivot_wider(names_from = "id", values_from = Completely.Mapped.Reads) %>% 
+  #filter(ARO.Term %in% aroterms) %>% 
+  tibble::column_to_rownames(var = "ARO.Term")
+
+abund %>% head(2)
 
 ```
 
 # Coverage VS Mapped reads plot
 
-```{r}
-plot_coverage_numreads <- function(rgi_out,
-                               mapq_thresh = 100,
-                               coverage_thresh = 75,
-                               numreads_thresh = 5000){
-  rgi_out %>%
+```{r fig.width=6, fig.height=6}
+mapq_thresh = 100
+coverage_thresh = 75
+numreads_thresh = 5000
+
+gmd %>%
   filter(Average.MAPQ..Completely.Mapped.Reads. > mapq_thresh) %>%
   mutate(
     thresh_group = case_when(
@@ -40,30 +62,19 @@ plot_coverage_numreads <- function(rgi_out,
              y = Average.Percent.Coverage,
              color = thresh_group)) +
   geom_point(size = 3, alpha = 0.7) +
-  geom_vline(xintercept = numreads_thresh, linetype = "dashed", color = "gray40") +
-  geom_hline(yintercept = coverage_thresh, linetype = "dashed", color = "gray40") +
-  scale_color_manual(values = c("both" = "green", 
-                                "numreads_pass" = "blue", 
-                                "coverage_pass" = "orange", 
-                                "fail" = "gray")) +
+  geom_vline(xintercept = numreads_thresh, linetype = 1, color = "gray30") +
+  geom_hline(yintercept = coverage_thresh, linetype = 1, color = "gray30") +
+  scale_color_manual(values = c("both" = "#FF7F0F", 
+                                "numreads_pass" = "#7681B3", 
+                                "coverage_pass" = "#AD9F71", 
+                                "fail" = "gray80")) +
   theme_minimal() +
   theme(legend.position = "none") +
-  labs(x = "All Mapped Reads",
-       y = "Average % Coverage",
+  labs(x = "Кількість прочитань",
+       y = "Покриття гену, %",
        title = "")
-}
+
 ```
-
-```{r fig.height=8}
-
-plot_coverage_numreads(gmd,
-                       mapq_thresh = params$mapq_thresh,
-                       coverage_thresh = params$coverage_thresh,
-                       numreads_thresh = params$numreads_thresh) +
-  facet_wrap(vars(station))
-```
-
-# Heatmap AMR x Sample coverage %
 
 ```{r}
 # a list of AR terms that passed the filter for at least a single sample
@@ -71,9 +82,339 @@ aroterms <- gmd %>% filter(Average.MAPQ..Completely.Mapped.Reads. > params$mapq_
                (Completely.Mapped.Reads > params$numreads_thresh |
                Average.Percent.Coverage > params$coverage_thresh)) %>% 
   pull(ARO.Term)
-
-gmd %>% filter(duplicated(gmd$ARO.Term))
 ```
+
+# Permanova
+
+```{r}
+nreads_df <- gmd %>% 
+  filter(ARO.Term %in% aroterms) %>% 
+  select(id, ARO.Term, Completely.Mapped.Reads) %>% 
+  tidyr::pivot_wider(names_from = ARO.Term, values_from = Completely.Mapped.Reads) %>% 
+  tibble::column_to_rownames(var = "id")
+head(nreads_df, 2)
+```
+
+## Between stations
+
+```{r}
+# Bray-Curtis (abundance-based)
+bray_dist <- vegdist(nreads_df, method = "bray", na.rm = TRUE)
+# Permanova on Bray-Curtis dissimilarity matrix
+bstation <- adonis2(bray_dist ~ station, data = meta, permutations = 999)
+bstation
+```
+
+```{r}
+# Jaccard (presence/absence)
+binary_matrix <- as.data.frame((nreads_df > 0) * 1)
+binary_matrix[is.na(binary_matrix)] <- 0
+jaccard_dist <- vegdist(binary_matrix, method = "jaccard", na.rm = TRUE)
+
+jstation <- adonis2(jaccard_dist ~ station, data = meta, permutations = 999)
+jstation
+```
+
+# Surface
+
+```{r}
+table(meta$surface)
+```
+
+Only the surfaces with at least 10 samples are tested.
+
+```{r}
+surface_subs <- meta %>%
+  filter(surface %in% c("bench", "entrance_door", "handrail", "ticket_machine")) %>% 
+  rownames()
+
+bsurface <- adonis2(dist_subset(bray_dist, surface_subs) ~ surface,
+        data = meta[surface_subs, ], permutations = 999)
+bsurface
+```
+
+```{r}
+jsurface <- adonis2(dist_subset(jaccard_dist, surface_subs) ~ surface,
+        data = meta[surface_subs, ], permutations = 999)
+jsurface
+```
+
+## Material
+
+```{r}
+material_subs <- meta %>%
+  filter(surface_material %in% c("metal", "plastic", "wood")) %>% 
+  rownames()
+
+bmaterial <- adonis2(dist_subset(bray_dist, material_subs) ~ surface_material,
+        data = meta[material_subs, ], permutations = 999)
+
+bmaterial
+```
+
+!!!
+
+```{r}
+jmaterial <- adonis2(dist_subset(jaccard_dist, material_subs) ~ surface_material,
+        data = meta[material_subs, ], permutations = 999)
+jmaterial
+```
+
+```{r}
+sink("out/AMR-analysis/PERMANOVA_AMR-profiles.txt")
+bstation
+jstation
+bsurface
+jsurface
+bmaterial
+jmaterial
+sink()
+```
+
+## Visualization of a significant result
+
+```{r fig.width= 8, fig.height = 8}
+jmat <- as.matrix(dist_subset(jaccard_dist, material_subs))
+
+split <- meta[rownames(jmat), "Матеріал"]
+split_colors <- setNames(rainbow(length(unique(split))), unique(stations))
+
+Heatmap(jmat,
+        name = "Індекс\nЖаккара",
+        show_column_names = F, show_row_names = F,
+        cluster_rows = T, cluster_columns = T,
+        split = split)
+```
+
+# Basic stats
+
+```{r}
+arostat <- abund %>%
+  mutate(across(everything(), ~replace_na(., 0))) %>%  
+  mutate(
+    abund = rowSums(., na.rm = T),
+    prev = rowSums(. > 0, na.rm = T),
+    prevperc = rowMeans(. > 0, na.rm = T)*100) %>%
+  merge(arometa, by = "row.names") %>% 
+  select(!starts_with("haib"))
+
+arostat %>% group_by(Resistance.Mechanism) %>%
+  summarize(abund = sum(abund),
+            aroterms = n_distinct(Row.names)) %>%
+  arrange(desc(abund))
+
+arrange(arostat, desc(abund)) %>% head(20)
+
+filter(arostat, prevperc == 100) %>% arrange(desc(abund))
+
+```
+```{r}
+# save core AMR table
+filter(arostat, prevperc == 100) %>% arrange(desc(abund)) %>% 
+  write.csv("out/AMR-analysis/core-AMR-genes.csv")
+```
+
+```{r}
+gmd %>% filter(ARO.Term == "qacG")
+gmd %>% filter(Resistance.Mechanism == "antibiotic target alteration; antibiotic target replacement") %>% 
+  pull(ARO.Term) %>% unique()
+```
+
+```{r}
+
+  #select(species, abund, prevperc) %>% 
+  
+prevstat %>%   
+group_by(Resistance.Mechanism) %>% 
+  summarize(abund = sum(abund)) %>% 
+  arrange(desc(abund)) %>% 
+  rename("Механізм резистеності" = Resistance.Mechanism,
+         "Загальна кількість прочитань" = abund)
+  
+prevstat %>% 
+  arrange(desc(abund))
+```
+
+```{r}
+summarize_amr <- function(group_var) {
+  gmd %>%
+    select(ARO.Term, Completely.Mapped.Reads, id) %>%
+    tidyr::pivot_wider(names_from = "ARO.Term", values_from = Completely.Mapped.Reads) %>%
+    tibble::column_to_rownames(var = "id") %>%
+    mutate(
+      across(everything(), ~tidyr::replace_na(., 0)),
+      !!group_var := meta[rownames(.), group_var]  # dynamically insert column name
+    ) %>%
+    group_by(.data[[group_var]]) %>%   # group by the dynamic column
+    summarize(across(where(is.numeric), sum), .groups = "drop") %>%
+    mutate(
+      "Прочитань" = rowSums(select(., where(is.numeric)), na.rm = TRUE),
+      "АМР генів" = rowSums(select(., where(is.numeric)) > 0, na.rm = TRUE)
+    ) %>%
+    select(all_of(group_var), "Прочитань", "АМР генів") %>%
+    arrange(desc(`АМР генів`))
+}
+summarize_amr("Станція")
+summarize_amr("Матеріал")
+summarize_amr("Поверхня")
+
+```
+
+## kruskal wallis between materials by number of AMR genes
+
+```{r}
+arocount_material <- gmd %>%
+  select(ARO.Term, Completely.Mapped.Reads, id) %>%
+  pivot_wider(names_from = "ARO.Term", values_from = Completely.Mapped.Reads) %>%
+  column_to_rownames(var = "id") %>%
+  mutate(arocount = rowSums(. > 0, na.rm = T),
+         material = meta[rownames(.), "Матеріал"]) %>% 
+  select(arocount, material)
+head(arocount_material, 2)
+```
+
+```{r}
+arocount_material %>% 
+  filter(material %in% c("дерево", "метал", "пластик")) %>% 
+  group_by(material) %>%
+  summarise(shapiro_test = shapiro.test(arocount)$p.value)
+```
+
+```{r}
+kruskal.test(arocount ~ material, data = arocount_material)
+```
+
+
+## Adundance of selected amr genes
+
+```{r}
+abundmat <- abund %>% filter(rownames(.) %in% aroterms) %>% data.matrix %>% log10()
+#abundmat[is.na(abundmat)] <- min(abundmat, na.rm = TRUE) - 1
+
+colannot <- HeatmapAnnotation(which = "column",
+    "Матеріал" = meta[colnames(abundmat), "Матеріал"],
+    "Станції" = meta[colnames(abundmat), "Станція"])
+
+```
+
+```{r fig.width=7, fig.height=6}
+mech <- factor(arometa[rownames(abundmat), "Механізм резистентності"])
+mech_colors <- setNames(colors[2:7], levels(mech))
+rowannot <- rowAnnotation(
+   show_legend = FALSE,
+   Механізм = mech,
+   col = list(Механізм = mech_colors),
+  annotation_name_gp = gpar(fontsize = 0),
+  annotation_legend_param = list(
+    Механізм = list(ncol = 2, break_dist = 880)
+  )
+)
+
+
+col_fun = colorRamp2(c(0, 6), c("white", "#8A2F2F"))
+
+
+hm <- Heatmap(abundmat,
+              col = col_fun,
+              row_labels = abbreviate(rownames(abundmat), minlength = 10),
+              cluster_rows = F, cluster_columns = F,
+              name = "Прочитань, log10",
+              row_names_gp = gpar(fontsize = 8),
+        right_annotation = rowannot,
+        show_row_names = T,  show_column_names = F,
+        heatmap_legend_param = list(
+          direction = "vertical",
+          #col_fun = col_fun,
+          title = "Прочитань, log10",
+          title_position = "lefttop-rot",
+          legend_height = unit(5, "cm")))
+
+
+mech_legend <- Legend(
+  title = "Механізм",
+  at = names(mech_colors),
+  labels = names(mech_colors),
+  legend_gp = gpar(fill = mech_colors),
+  ncol = 3,
+  gap = unit(20, "mm"),  # Controls spacing between columns
+  labels_gp = gpar(fontsize = 10)
+)
+
+draw(hm,
+     heatmap_legend_side = "left",
+     annotation_legend_list = list(mech_legend),
+     annotation_legend_side = "bottom")
+```
+
+```{r}
+cairo_pdf(file = "figures/amr-heatmap.pdf",
+width = 7, # The width of the plot in inches
+    height = 6) # The height of the plot in inches
+draw(hm,
+     heatmap_legend_side = "left",
+     annotation_legend_list = list(mech_legend),
+     annotation_legend_side = "bottom")
+dev.off()
+```
+
+## Box plots of reads attributed to AMR genes / number of AMR genes per mechanism
+
+```{r fig.width=3.5, fig.height=3.5}
+b1 <- abund %>% 
+  tibble::rownames_to_column(var = "aro") %>% 
+  pivot_longer(!aro, names_to = "samples", values_to = "abund") %>% 
+  mutate("Механізм" = arometa[.$aro, "Механізм резистентності"]) %>% 
+  ggplot(aes(x = Механізм, y = abund, fill = Механізм)) +
+  geom_jitter(aes(color = Механізм),
+              width = 0.2, alpha = 0.7, size = 1, show.legend = FALSE) +
+  geom_boxplot(outlier.shape = NA, alpha = 0) +
+  #scale_y_continuous(name = "Абунданс") +
+  #scale_x_discrete(name = "Механізм резистентності") +
+  scale_y_log10() +
+  labs(x = NULL, y = "Прочитань, log10") +
+  theme_classic(base_size = 10) +
+  theme(legend.position = "none") +
+   coord_flip() +
+  scale_color_manual(values = colors[2:10])
+
+b1
+```
+
+```{r fig.width=3.5, fig.height=3.5}
+b2 <- abund %>% mutate(nsamples = rowSums(. > 0, na.rm = T)) %>% 
+  select(nsamples) %>% 
+  mutate("Механізм" = arometa[rownames(.), "Механізм резистентності"]) %>% 
+  ggplot(aes(x = Механізм, y = nsamples, fill = Механізм)) +
+  geom_jitter(aes(color = Механізм),
+              width = 0.2, alpha = 0.7, size = 1, show.legend = FALSE) +
+  geom_boxplot(outlier.shape = NA, alpha = 0) +
+  #scale_y_continuous(name = "Абунданс") +
+  #scale_x_discrete(name = "Механізм резистентності") +
+  labs(x = NULL, y = "Зразків") +
+  theme_classic(base_size = 10) +
+  theme(legend.position = "none") +
+   coord_flip() +
+  scale_color_manual(values = colors[2:10])
+
+b2
+```
+
+
+```{r fig.width=4, fig.height=3.5}
+library(patchwork)
+
+b1 + b2 + plot_layout(axes = "collect")
+```
+
+```{r}
+cairo_pdf(file = "figures/amr-boxplots.pdf",
+width = 4, # The width of the plot in inches
+    height = 3.5)
+b1 + b2 + plot_layout(axes = "collect")
+dev.off()
+```
+
+# Heatmap AMR x Sample coverage %
 
 ```{r coverage matrix}
 covmat <- gmd %>% filter(ARO.Term %in% aroterms) %>% select(ARO.Term, id, Average.Percent.Coverage) %>%
