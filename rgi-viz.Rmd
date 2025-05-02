@@ -30,7 +30,7 @@ arometa <- gmd %>%
   select(ARO.Term, Resistance.Mechanism, AMR.Gene.Family, Drug.Class) %>% 
   filter(!duplicated(.)) %>% arrange(ARO.Term) %>% 
   tibble::column_to_rownames(var = "ARO.Term") %>% 
-  mutate("Механізм резистентності" = mechanisms[arometa$Resistance.Mechanism])
+  mutate("Механізм резистентності" = mechanisms[.$Resistance.Mechanism])
 
 abund <- gmd %>%
   select(ARO.Term, Completely.Mapped.Reads, id) %>%
@@ -161,6 +161,13 @@ jmaterial
 ```
 
 ```{r}
+#devtools::install_github("pmartinezarbizu/pairwiseAdonis/pairwiseAdonis")
+library(pairwiseAdonis)
+pairwise.adonis(dist_subset(jaccard_dist, material_subs),
+        factors = meta[material_subs, "surface_material"])
+```
+
+```{r}
 sink("out/AMR-analysis/PERMANOVA_AMR-profiles.txt")
 bstation
 jstation
@@ -208,10 +215,19 @@ arrange(arostat, desc(abund)) %>% head(20)
 filter(arostat, prevperc == 100) %>% arrange(desc(abund))
 
 ```
+
 ```{r}
 # save core AMR table
 filter(arostat, prevperc == 100) %>% arrange(desc(abund)) %>% 
   write.csv("out/AMR-analysis/core-AMR-genes.csv")
+```
+
+```{r}
+# core amr average coverage
+core_amr <- filter(arostat, prevperc == 100) %>% arrange(desc(abund)) %>% pull(Row.names)
+gmd %>% select(ARO.Term, Average.Percent.Coverage) %>% 
+  filter(ARO.Term %in% arostat[arostat$prevperc == 100, "Row.names"]) %>% 
+  group_by(ARO.Term) %>% summarize(avr_cov = mean(Average.Percent.Coverage))
 ```
 
 ```{r}
@@ -224,15 +240,17 @@ gmd %>% filter(Resistance.Mechanism == "antibiotic target alteration; antibiotic
 
   #select(species, abund, prevperc) %>% 
   
-prevstat %>%   
+arostat %>%   
 group_by(Resistance.Mechanism) %>% 
   summarize(abund = sum(abund)) %>% 
   arrange(desc(abund)) %>% 
   rename("Механізм резистеності" = Resistance.Mechanism,
          "Загальна кількість прочитань" = abund)
-  
-prevstat %>% 
-  arrange(desc(abund))
+# filtered resistome stats  
+arostat %>% 
+  filter(Row.names %in% aroterms) %>% 
+  arrange(desc(abund)) 
+#%>%  write.csv("out/AMR-analysis/set50-AMR-genes-stats.csv")
 ```
 
 ```{r}
@@ -294,10 +312,21 @@ abundmat <- abund %>% filter(rownames(.) %in% aroterms) %>% data.matrix %>% log1
 colannot <- HeatmapAnnotation(which = "column",
     "Матеріал" = meta[colnames(abundmat), "Матеріал"],
     "Станції" = meta[colnames(abundmat), "Станція"])
-
+#abundmat %>% saveRDS("abundmat.rds")
+#mech_colors %>% saveRDS("mech_colors.rds")
+#rowannot %>% saveRDS("rowannot.rds")
+readRD
 ```
 
 ```{r fig.width=7, fig.height=6}
+aroshort = c("vanT gene in vanG cluster" = "vanTG",
+             "vanY gene in vanF cluster" = "vanYF",
+             "vanR gene in vanO cluster" = "vanRO",
+             "vanY gene in vanM cluster" = "vanYM",
+             "vanH gene in vanD cluster" = "vanHD",
+             "Klebsiella pneumoniae acrA" = "Kpne_acrA",
+             "Escherichia coli emrE" = "Ecol_emrE")
+
 mech <- factor(arometa[rownames(abundmat), "Механізм резистентності"])
 mech_colors <- setNames(colors[2:7], levels(mech))
 rowannot <- rowAnnotation(
@@ -316,7 +345,11 @@ col_fun = colorRamp2(c(0, 6), c("white", "#8A2F2F"))
 
 hm <- Heatmap(abundmat,
               col = col_fun,
-              row_labels = abbreviate(rownames(abundmat), minlength = 10),
+              row_labels = ifelse(
+    rownames(abundmat) %in% names(aroshort),
+    aroshort[rownames(abundmat)],
+    rownames(abundmat)
+),
               cluster_rows = F, cluster_columns = F,
               name = "Прочитань, log10",
               row_names_gp = gpar(fontsize = 8),

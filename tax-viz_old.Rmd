@@ -172,11 +172,12 @@ ggplot(meta, aes(x=num_reads)) +
 ```{r}
 bardata <- 
 read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/kraken-top-n-plot_Species.txt",
-           check.names = F) %>%
+           check.names = F) %>% 
   mutate(id = word(Sample, 3, sep = "_")) %>% 
   select(!Sample) %>% 
   mutate(Classified = rowSums(select(., -c(id, Unclassified)))) %>% 
   select(id, Classified, Unclassified) %>% 
+  rename("")
   mutate(id = fct_reorder(id, Classified))  %>%
   pivot_longer(!id) %>%
   mutate(name = factor(name, levels = c("Unclassified", "Classified"))) 
@@ -185,12 +186,12 @@ read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/kraken-top-n-plot_
 ```{r fig.height=8, fig.width=9}
 p1 <- ggplot(bardata, aes(fill=name, y=id, x=value)) + 
     geom_bar(position="stack", stat="identity") +
-  labs(title = "Number of reads", y = NULL, x = NULL) +
+  labs(title = "Кількість прочитань", y = NULL, x = NULL) +
   theme_minimal()
 
 p2 <- percreads <- ggplot(bardata, aes(fill=name, y=id, x=value)) + 
     geom_bar(position="fill", stat="identity") +
-  labs(title = "Fraction of reads", y = NULL, x =NULL) +
+  labs(title = "Пропорція прочитань", y = NULL, x =NULL) +
   theme_minimal()
 
 p1 + p2 + 
@@ -337,7 +338,6 @@ draw(hm, column_title = "Кількість прочитань", cluster)
 #install.packages('pcaPP')
 cormat <- pcaPP::cor.fk(bracken)
 ```
-
 
 ```{r fig.height=12, fig.width=12}
 ha = HeatmapAnnotation("Станція" = annotdf[samples_order, "station"],

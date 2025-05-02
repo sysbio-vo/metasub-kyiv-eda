@@ -48,6 +48,15 @@ ktax <- read.delim(params$taxtable, header = F,
                    col.names = ktax_cols) %>% 
   column_to_rownames("taxid")
 ```
+# Sample categories table
+
+```{r}
+library(rlang)
+for(group in c("Станція", "Поверхня", "Матеріал")){
+  meta %>% filter(surface != "floor") %>% group_by(!!sym(group)) %>%
+    summarize("Зразків" = n()) %>% arrange(desc(Зразків)) %>% print()
+}
+```
 
 # Permanova
 
@@ -383,6 +392,39 @@ Heatmap(lfc_mat,
 
 dev.off()
 ```
+```{r}
+t_lfc_mat <- t(lfc_mat)
+t_diff_mat <- t(diff_mat)
+t_ss_mat <- t(ss_mat)
+```
+
+```{r fig.width = 5.5, fig.height=7}
+cairo_pdf(file = "figures/ancombc2.stations.pairwise-test_transposed.pdf",
+    width = 5.5,
+    height = 7) # The height of the plot in inches
+
+Heatmap(t_lfc_mat,
+        name = "LFC",
+        show_heatmap_legend = FALSE,
+        column_labels = sapply(strsplit(colnames(t_lfc_mat), " "), function(x) paste0(substr(x[1], 1, 1), ". ", x[2])),
+                col = colorRamp2(c(-3, 0, 3), c("#26576f", "white", "#8a2f2f")),
+                cluster_columns = FALSE, cluster_rows = FALSE,
+                show_column_names = TRUE,
+                show_row_names = TRUE,
+                #column_title = "ANCOMBC2: Pairwise тест між станціями",
+                column_names_rot = 90,
+         width = unit(70, "mm"), height = unit(110, "mm"),
+                row_names_side = "left",
+                cell_fun = function(j, i, x, y, w, h, fill) {
+                  if (!is.na(t_diff_mat[i, j]) && t_diff_mat[i, j] && !t_ss_mat[i, j]) {
+                    grid.text("*", x, y, gp = gpar(fontsize = 10))
+                  }
+                  if (!is.na(t_diff_mat[i, j]) && t_diff_mat[i, j] && t_ss_mat[i, j]) {
+                    grid.text("**", x, y, gp = gpar(fontsize = 10))
+                  }
+                })
+dev.off()
+```
 
 ## DA station_specific
 
@@ -544,28 +586,28 @@ lfc_mat <- lfc_mat[rownames(diff_mat), ]
 ss_mat <- ss_mat[rownames(ss_mat), ]
 ```
 
-```{r fig.width = 6.5, fig.height = 8}
+```{r fig.width = 6.5, fig.height = 7}
 
 # * * * Plot the heatmap * * *
 cairo_pdf(file = "figures/ancombc2.surface_material.pairwise-test.pdf",
     width = 6.5, # The width of the plot in inches
-    height = 8) # The height of the plot in inches
+    height = 7) # The height of the plot in inches
 
 # shorten the name of the species
 row_labels <- rownames(lfc_mat)
 row_labels[row_labels == "Spiroplasma endosymbiont of Diplazon laetatorius"] <- "Spiroplasma endosymbiont"
 
-Heatmap(lfc_mat,
+material_hm <- Heatmap(lfc_mat,
                 name = "LFC",
                 col = colorRamp2(c(-3, 0, 3), c("#26576f", "white", "#8a2f2f")),
                 cluster_columns = FALSE, cluster_rows = FALSE,
                 show_column_names = TRUE,
                 show_row_names = TRUE,
         row_labels = row_labels,
-                column_title = "ANCOMBC2: Pairwise тест між матеріалами",
+                #column_title = "ANCOMBC2: Pairwise тест між матеріалами",
                 column_names_rot = 10,
         #column_names_centered = TRUE,
-         width = unit(89, "mm"), height = unit(180, "mm"),
+         width = unit(70, "mm"), height = unit(160, "mm"),
                 row_names_side = "left",
                 cell_fun = function(j, i, x, y, w, h, fill) {
                   if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && !ss_mat[i, j]) {
@@ -574,12 +616,13 @@ Heatmap(lfc_mat,
                       grid.text("**", x, y, gp = gpar(fontsize = 10))
                       }
                 })
+material_hm
 
 dev.off()
 ```
 
 
-```{r fig.width = 6.5, fig.height = 8}
+```{r fig.width = 6, fig.height = 7}
 Heatmap(lfc_mat,
                 name = "LFC",
                 col = colorRamp2(c(-3, 0, 3), c("blue", "white", "red")),
@@ -587,10 +630,10 @@ Heatmap(lfc_mat,
                 show_column_names = TRUE,
                 show_row_names = TRUE,
         row_labels = row_labels,
-                column_title = "ANCOMBC2: Pairwise тест між матеріалами",
+                #column_title = "ANCOMBC2: Pairwise тест між матеріалами",
                 column_names_rot = 10,
         #column_names_centered = TRUE,
-         width = unit(89, "mm"), height = unit(180, "mm"),
+         width = unit(70, "mm"), height = unit(160, "mm"),
                 row_names_side = "left",
                 cell_fun = function(j, i, x, y, w, h, fill) {
                   if (!is.na(diff_mat[i, j]) && diff_mat[i, j] && !ss_mat[i, j]) {
@@ -737,3 +780,16 @@ addWorksheet(wb, "surface_pair")
 writeData(wb, sheet = "surface_pair", x = res_pair)
 saveWorkbook(wb, "out/DA_analysis/ANCOMBC_res.xlsx", overwrite = T)
 ```
+
+
+## Combined paired-test plot: material + station
+
+```{r}
+library(patchwork)
+
+station_hm + material_hm
+
+draw(station_hm)
+draw(material_hm)
+```
+
