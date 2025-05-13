@@ -88,7 +88,7 @@ pathogen_list <- read.delim(params$pathogen_list) %>% pull(., var = "taxon_name"
 
 prevstat %>% 
   mutate(is_pathogen = if_else(species %in% pathogen_list, TRUE, FALSE)) %>% 
-  filter(is_pathogen) %>% 
+  filter(is_pathogen) %>%
   arrange(desc(abund)) %>% 
   filter(prevperc >= 90)
 ```
@@ -132,23 +132,19 @@ taxmeta <- taxmeta[match(tree$tip.label, taxmeta$Species), ]
 rownames(taxmeta) <- taxmeta$Species
 taxmeta <- taxmeta %>% select(Group)
 
-palette <- c("#c5ae93", "#828cb4", "#45aad5", "#26576f", "#4c3c43")
+palette <- c("#c5ae93", "#828cb4", "#26576f", "#45aad5", "#eda8b7", "#4c3c43")
 # If you know the specific group names, assign them explicitly:
 # names(group_colors) <- c("Group1", "Group2", "Group3", "Group4", "Group5")
 ```
 
-```{r fig.width = 7, fig.height=7}
-cairo_pdf(file = "figures/core-taxa-lineage-tree.pdf",   # The directory you want to save the file in
-width = 7, # The width of the plot in inches
-    height = 7) # The height of the plot in inches
-
+```{r, fig.width = 12, fig.height=7}
 # Basic tree
 p <- ggtree(tree, layout = "circular") +
   geom_tiplab(size = 3, offset = 40) +
   xlim(0, 225)
 
 # Heatmap with custom colors and no legend title
-gheatmap(
+p <- gheatmap(
   p,
   taxmeta,
   offset = 0,
@@ -163,11 +159,32 @@ gheatmap(
   theme(
     legend.text = element_text(size = 9),
     #legend.position = "left",
-    legend.position = c(0.13, 0.1),
+    legend.position = c(-0.09, 0.57),
     legend.title = element_blank(),
     legend.background = element_rect(fill = "transparent", color = NA),
     #legend.key.size = unit(0.08, "in")
   )
+```
+
+```{r fig.width = 12, fig.height=7}
+cairo_pdf(file = "figures/core-taxa-lineage-tree_legend-left.pdf",   # The directory you want to save the file in
+width = 12, # The width of the plot in inches
+    height = 7) # The height of the plot in inches
+
+p
+
+dev.off()
+```
+
+```{r fig.width = 12, fig.height=7}
+png(filename = "figures/core-taxa-lineage-tree_legend-left.png",
+    width = 12,
+    height = 7,
+    units = "in",
+    res = 300) # The height of the plot in inches
+
+p
+
 dev.off()
 ```
 

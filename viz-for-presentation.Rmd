@@ -1,0 +1,391 @@
+---
+title: "viz-for-presentation"
+output: html_document
+---
+
+# Start
+
+- [x] unclassified reads per sample barplot
+- [] pies: reads per kingdom + species per kingdom + reads per most prevalent bacterial spp
+- [] move the legend core tree graph
+- [] methods diagram
+
+```{r}
+pacman::p_load("dplyr", "tidyr", "ggplot2", "factoextra", "stringr", "forcats",
+               "janitor", "ggfortify", "pheatmap", "vegan", "patchwork",
+               "ComplexHeatmap", "webr")
+
+colors = c("#8a2f2f","#c5ae93", "#eda8b7", "#828cb4", "#45aad5",
+           "#26576f", "#5468ba", "#e06781", "#a98760", "#36837e")
+```
+
+# (Un)lassified reads barchart
+
+```{r}
+bardata <- read.delim("out/taxonomy-analysis/multiqc_kraken/multiqc_data/kraken-top-n-plot_Species.txt",
+                      check.names = FALSE) %>%
+  mutate(id = word(Sample, 3, sep = "_")) %>%
+  select(-Sample) %>%
+  mutate(Classified = rowSums(select(., -c(id, Unclassified)))) %>%
+  select(id, Classified, Unclassified) %>%
+  mutate(id = fct_reorder(id, Classified)) %>%
+  rename("класифіковані" = Classified,
+         "не класифіковані" = Unclassified) %>%
+  pivot_longer(!id, names_to = "Прочитання", values_to = "value") %>%
+  mutate(Прочитання = factor(Прочитання, levels = c("не класифіковані", "класифіковані")))
+```
+
+```{r fig.height=6, fig.width=7}
+p1 <- ggplot(bardata, aes(fill=Прочитання, y=id, x=value)) + 
+    geom_bar(position="stack", stat="identity") +
+  scale_fill_manual(values = colors[c(2, 4)]) +
+  labs(title = NULL, y = NULL, x = "Абсолютна кількість прочитань") +
+  theme_minimal()
+
+p2 <- ggplot(bardata, aes(fill=Прочитання, y=id, x=value)) +
+  geom_bar(position="fill", stat="identity") +
+   scale_fill_manual(values = colors[c(2, 4)]) +
+  labs(title = NULL, y = NULL, x = "Відносна кількість прочитань") +
+  theme_minimal()
+
+
+p <- p1 + p2 + 
+  plot_layout(guides = "collect", axes = "collect_y") &
+  theme(legend.position = "top",
+        axis.text=element_text(size=6))
+p
+```
+```{r}
+cairo_pdf(file = "figures/unclass-reads-barchart.pdf",
+          width = 6,
+          height = 7)
+p
+dev.off()
+```
+
+```{r}
+png(filename = "figures/unclass-reads-barchart.png",
+    width = 6,
+    height = 7,
+    units = "in",
+    res = 300)  # 300 dpi for high-quality image
+p
+dev.off()
+```
+
+
+# Pies: reads / species per kingdom
+
+```{r}
+abund <- read.delim(params$abundance_table) %>%
+  select(taxonomy_id, ends_with("filtered_num")) %>% 
+  rename(taxid = taxonomy_id) %>% 
+  rename_with(~ stringr::str_remove_all(.x, "haib17CEM5241_HMGMHCCXY_|\\.out\\.bracken\\.filtered_num$")) %>% 
+  tibble::column_to_rownames(var = "taxid")
+
+tax_categories = c(taxid = "ID таксону",
+                   root = "Корінь",
+                   domain = "Домен",
+                   kingdom = "Царство",
+                   phylum  = "Тип",
+                   class = "Клас",
+                   order = "Порядок",
+                   family = "Родина",
+                   genus = "Рід",
+                   species = "Вид",
+                   subspecies = "Підвид")
+
+taxt <- read.delim(params$taxonomy_table, header = F,
+                   col.names = names(tax_categories)) %>% 
+  tibble::column_to_rownames(var = "taxid")
+
+head(abund, 2)
+head(taxt, 2)
+```
+```{r}
+piedata <- 
+  abund %>%
+  merge(select(taxt, domain), by = "row.names") %>%
+  mutate(domain = if_else(domain == "", "Virus", domain)) %>%
+  select(-Row.names) %>%
+  mutate(
+    total = rowSums(select(., where(is.numeric))),
+    nonzero = rowSums(select(., where(is.numeric)) > 0)
+  ) %>%
+  group_by(domain) %>%
+  summarise(
+    reads = sum(total),
+    taxs = sum(nonzero > 0),
+    .groups = "drop"
+  ) %>%
+  mutate(percreads = reads / sum(reads) * 100,
+         perctax = taxs / sum(taxs) * 100,
+         
+         label_reads = paste0(domain, "\n", formatC(reads, digits = 2), " (", round(percreads, 2), "%)"),
+         ymax_r = cumsum(reads),
+         ymin_r = lag(ymax_r, default = 0),
+    
+         label_tax = paste0(domain, "\n", taxs, " (", round(perctax, 2), "%)"),
+         ymax_t = cumsum(taxs),
+         ymin_t = lag(ymax_t, default = 0)
+  )
+
+```
+
+```{r fig.width = 3.5}
+library(ggrepel)
+p1 <-
+  ggplot(piedata, aes(ymax = ymax_r, ymin = ymin_r, xmax = 1, xmin = 0, fill = domain)) +
+  geom_rect(color = "white") +
+  coord_polar(theta = "y", start = pi/2, clip = "off") +
+  scale_fill_manual(values = colors[c(2, 3, 4, 6)]) +
+  labs(title = "Прочитань") +
+  theme_void() +
+  theme(plot.margin = margin(0, 100, 0, 0),
+        legend.position = "none") +
+  
+  # Labels for large slices (inside)
+  geom_text(data = filter(piedata, percreads >= 10),
+            aes(x = 0.5, y = (ymin_r + ymax_r)/2, label = label_reads),
+            inherit.aes = FALSE,
+            color = "white", size = 4, lineheight = 0.9) +
+  
+  geom_label_repel(data = filter(piedata, percreads < 10),
+                   aes(x = 1, y = (ymin_r + ymax_r)/2, label = label_reads),
+                   inherit.aes = FALSE,
+                   nudge_x = 0.1,  # Adjust if needed
+                   direction = "y",
+                   hjust = 0,
+                   segment.color = "grey50",
+                   size = 4)
+
+
+
+p2 <-
+  ggplot(piedata, aes(ymax = ymax_t, ymin = ymin_t, xmax = 1, xmin = 0, fill = domain)) +
+  geom_rect(color = "white") +
+  coord_polar(theta = "y", start = pi/2, clip = "off") +
+  scale_fill_manual(values = colors[c(2, 3, 4, 6)]) +
+  labs(title = "Таксонів") +
+  theme_void() +
+  theme(plot.margin = margin(0, 0, 0, 0),
+         legend.position = "none") +
+  
+  # Labels for large slices (inside)
+  geom_text(data = filter(piedata, perctax >= 10),
+            aes(x = 0.5, y = (ymin_t + ymax_t)/2, label = label_tax),
+            inherit.aes = FALSE,
+            color = "white", size = 4, lineheight = 0.9) +
+  # Labels for medium slices
+  geom_label_repel(data = filter(piedata, perctax < 10, perctax > 2),
+                   aes(x = 1, y = (ymin_t + ymax_t)/2, label = label_tax),
+                   inherit.aes = FALSE,
+                   nudge_x = 0.1,  # Adjust if needed
+                   direction = "y",
+                   hjust = 0,
+                   segment.color = "grey50",
+                   size = 4)
+```
+
+```{r fig.height = 7, fig.width = 5}
+p1 / p2
+```
+
+```{r}
+png(filename = "figures/domain-reads-taxa-pies.png",
+    width = 5,
+    height = 7,
+    units = "in",
+    res = 300)  # 300 dpi for high-quality image
+p1 / p2
+dev.off()
+```
+
+
+# Pie: reads per most prevalent bacterial spp
+
+```{r}
+donutdata <- 
+  abund %>%
+  merge(select(taxt, domain, phylum, species), by = "row.names") %>%
+  filter(domain == "Bacteria") %>% 
+  select(-Row.names, -domain) %>%
+  mutate(
+    total = rowSums(select(., where(is.numeric))),
+    species = if_else(total < 0.01*sum(total), "<1% прочитань", species)) %>%
+  group_by(phylum, species) %>%
+  summarise(reads = sum(total), .groups = "drop")
+
+donutdata %>% head(2)
+```
+
+```{r}
+cairo_pdf(file = "figures/tmp.pdf",
+          width = 8,
+          height = 8)
+dev.off()
+PieDonut(donutdata, aes(phylum, species, count=reads))
+```
+
+```{r}
+ggplot(donutdata, aes(x = 2, y = reads, fill = species)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  xlim(0.5, 2.5) +  # Creates the hole
+  theme_void() +
+  labs(title = "Донат графік по видах", fill = "Види") +
+  theme(legend.position = "right")
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggforce)
+
+# Prepare data
+donutdata <- abund %>%
+  merge(select(taxt, domain, phylum, species), by = "row.names") %>%
+  filter(domain == "Bacteria") %>% 
+  select(-Row.names, -domain) %>%
+  mutate(
+    total = rowSums(select(., where(is.numeric))),
+    species = if_else(total < 0.01 * sum(total), "", species)
+  ) %>%
+  group_by(phylum, species) %>%
+  summarise(reads = sum(total), .groups = "drop") %>%
+  ungroup()
+
+# Compute angles
+donutdata <- donutdata %>%
+  arrange(phylum, species) %>%
+  mutate(
+    fraction = reads / sum(reads),
+    ymax = cumsum(fraction),
+    ymin = lag(ymax, default = 0),
+    start = 2 * pi * ymin,
+    end = 2 * pi * ymax
+  )
+
+# Create outer ring (species) and inner ring (phylum)
+inner_ring <- donutdata %>%
+  group_by(phylum) %>%
+  summarise(reads = sum(reads)) %>%
+  mutate(
+    fraction = reads / sum(reads),
+    ymax = cumsum(fraction),
+    ymin = lag(ymax, default = 0),
+    start = 2 * pi * ymin,
+    end = 2 * pi * ymax,
+    r0 = 0,
+    r = 0.5,
+    label = phylum
+  )
+
+outer_ring <- donutdata %>%
+  mutate(
+    r0 = 0.5,
+    r = 1,
+    label = species
+  )
+
+# Combine and plot
+sunburst_data <- bind_rows(inner_ring, outer_ring)
+
+ggplot(sunburst_data) +
+  geom_arc_bar(aes(x0 = 0, y0 = 0, r0 = r0, r = r,
+                   start = start, end = end, fill = label),
+               color = "white") +
+  coord_fixed() +
+  theme_void() +
+  labs(title = "Sunburst plot: Bacterial phyla and species")
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggforce)
+library(scales)  # for percent formatting
+
+# Custom colors
+colors <- c("#8a2f2f","#c5ae93", "#eda8b7", "#828cb4", "#45aad5",
+            "#26576f", "#5468ba", "#e06781", "#a98760", "#36837e")
+
+# Step 1: Prepare the data
+donutdata <- abund %>%
+  merge(select(taxt, domain, phylum, species), by = "row.names") %>%
+  filter(domain == "Bacteria") %>% 
+  select(-Row.names, -domain) %>%
+  mutate(
+    total = rowSums(select(., where(is.numeric))),
+    species = if_else(total < 0.01 * sum(total), "", species)
+  ) %>%
+  group_by(phylum, species) %>%
+  summarise(reads = sum(total), .groups = "drop") %>%
+  ungroup()
+
+# Step 2: Calculate angles and radius for sunburst
+donutdata <- donutdata %>%
+  arrange(phylum, species) %>%
+  mutate(
+    fraction = reads / sum(reads),
+    ymax = cumsum(fraction),
+    ymin = lag(ymax, default = 0),
+    start = 2 * pi * ymin,
+    end = 2 * pi * ymax,
+    r0 = 0.5,
+    r = 1,
+    label = species
+  )
+
+# Inner ring (phylum)
+inner_ring <- donutdata %>%
+  group_by(phylum) %>%
+  summarise(reads = sum(reads)) %>%
+  mutate(
+    fraction = reads / sum(reads),
+    ymax = cumsum(fraction),
+    ymin = lag(ymax, default = 0),
+    start = 2 * pi * ymin,
+    end = 2 * pi * ymax,
+    r0 = 0,
+    r = 0.5,
+    label = phylum
+  )
+
+# Combine for plotting
+sunburst_data <- bind_rows(inner_ring, donutdata)
+
+# Step 3: Add labels for species > 10%
+label_data <- donutdata %>%
+  filter(fraction > 0.01) %>%
+  mutate(
+    angle = (start + end) / 2,
+    x = 1.1 * cos(angle),
+    y = 1.1 * sin(angle),
+    label = paste0(species, "\n", percent(fraction, accuracy = 1))
+  )
+```
+
+```{r, fig.width = 12}
+# Step 4: Plot
+p <- ggplot(sunburst_data) +
+  geom_arc_bar(aes(x0 = 0, y0 = 0, r0 = r0, r = r,
+                   start = start, end = end, fill = label),
+               color = "white") +
+  geom_label(data = filter(label_data, species != ""),
+            aes(x = x, y = y, label = label),
+            size = 4, hjust = 0.5, vjust = 0.5) +
+  scale_fill_manual(values = rep(colors, 5)) +
+  coord_fixed() +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.margin = margin(0, 200, 0, 200))
+  #labs(title = "Sunburst plot: Bacterial phyla and species")
+
+gt <- ggplotGrob(p)
+gt$layout[gt$layout$name == "panel", "clip"] <- "off"
+grid.newpage()
+grid.draw(gt)
+```
+
